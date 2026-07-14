@@ -6,5 +6,6 @@ img.example.com {
         max_size 420MB
     }
 
+    # Must match PORT in /etc/picnest/picnest.env.
     reverse_proxy 127.0.0.1:18765
 }

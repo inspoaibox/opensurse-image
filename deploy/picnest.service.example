@@ -8,8 +8,7 @@ User=picnest
 Group=picnest
 WorkingDirectory=/opt/picnest
 Environment=NODE_ENV=production
-Environment=PORT=18765
-EnvironmentFile=-/etc/picnest/picnest.env
+EnvironmentFile=/etc/picnest/picnest.env
 ExecStart=/usr/bin/node server/index.js
 Restart=on-failure
 RestartSec=5
