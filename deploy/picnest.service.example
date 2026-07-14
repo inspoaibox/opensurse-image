@@ -1,0 +1,23 @@
+[Unit]
+Description=PicNest image hosting service
+After=network.target
+
+[Service]
+Type=simple
+User=picnest
+Group=picnest
+WorkingDirectory=/opt/picnest
+Environment=NODE_ENV=production
+Environment=PORT=18765
+EnvironmentFile=-/etc/picnest/picnest.env
+ExecStart=/usr/bin/node server/index.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/picnest/server/data /opt/picnest/server/uploads
+
+[Install]
+WantedBy=multi-user.target

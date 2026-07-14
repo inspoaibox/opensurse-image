@@ -1,0 +1,10 @@
+img.example.com {
+    encode zstd gzip
+
+    # Maximum authenticated batch: 20 files x 20 MB plus multipart overhead.
+    request_body {
+        max_size 420MB
+    }
+
+    reverse_proxy 127.0.0.1:18765
+}
