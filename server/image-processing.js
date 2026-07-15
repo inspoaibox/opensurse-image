@@ -53,12 +53,20 @@ export const normalizeAllowedExtensions = (value, fallback = defaultAllowedExten
 const allowedExtensionsText = (allowedExtensions) => allowedExtensions.map((extension) => extension.toUpperCase()).join('、')
 
 export const validateUploadFilename = (filename, allowedExtensions) => {
-  const extension = normalizeUploadExtension(path.extname(String(filename || '')))
+  const normalizedFilename = String(filename || '')
+  if (normalizedFilename.length > 255) throw new ImageProcessingError('文件名不能超过 255 个字符', 400)
+  const extension = normalizeUploadExtension(path.extname(normalizedFilename))
   if (!extension || !allowedExtensions.includes(extension)) {
     const requested = extension ? `.${extension}` : '无扩展名'
     throw new ImageProcessingError(`不允许上传 ${requested} 文件，允许类型：${allowedExtensionsText(allowedExtensions)}`, 400)
   }
   return extension
+}
+
+const normalizeBooleanSetting = (value, fallback, label) => {
+  if (value === undefined) return Boolean(fallback)
+  if (typeof value !== 'boolean') throw new ImageProcessingError(`${label}必须是布尔值`, 400)
+  return value
 }
 
 export const normalizeImageProcessingSettings = (input = {}, fallback = defaultImageProcessingSettings) => {
@@ -67,11 +75,11 @@ export const normalizeImageProcessingSettings = (input = {}, fallback = defaultI
   if (!imageOutputFormats.has(outputFormat)) throw new ImageProcessingError('输出格式仅支持原格式、JPG、PNG、WebP 或 AVIF', 400)
   if (!Number.isInteger(quality) || quality < 1 || quality > 100) throw new ImageProcessingError('图片质量必须是 1 到 100 的整数', 400)
   return {
-    enabled: input.enabled === undefined ? Boolean(fallback.enabled) : Boolean(input.enabled),
+    enabled: normalizeBooleanSetting(input.enabled, fallback.enabled, 'enabled'),
     outputFormat,
     quality,
-    autoOrient: input.autoOrient === undefined ? Boolean(fallback.autoOrient) : Boolean(input.autoOrient),
-    stripMetadata: input.stripMetadata === undefined ? Boolean(fallback.stripMetadata) : Boolean(input.stripMetadata),
+    autoOrient: normalizeBooleanSetting(input.autoOrient, fallback.autoOrient, 'autoOrient'),
+    stripMetadata: normalizeBooleanSetting(input.stripMetadata, fallback.stripMetadata, 'stripMetadata'),
     allowedExtensions: normalizeAllowedExtensions(input.allowedExtensions, fallback.allowedExtensions || defaultAllowedExtensions),
   }
 }

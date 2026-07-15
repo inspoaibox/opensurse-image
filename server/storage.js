@@ -22,6 +22,7 @@ const encodeObjectKey = (value) => String(value).split('/').map(encodeURICompone
 
 const requireHttpUrl = (value, label) => {
   try {
+    if (String(value).length > 2048) throw new StorageManagerError(`${label}不能超过 2048 个字符`)
     const url = new URL(value)
     if (!['http:', 'https:'].includes(url.protocol)) throw new Error('invalid protocol')
     if (url.username || url.password) throw new StorageManagerError(`${label}不能在地址中包含用户名或密码`)
@@ -34,6 +35,7 @@ const requireHttpUrl = (value, label) => {
 
 const normalizePathPrefix = (value) => {
   const prefix = trimSlashes(value)
+  if (prefix.length > 512) throw new StorageManagerError('对象路径前缀不能超过 512 个字符')
   if (prefix.split('/').some((part) => part === '.' || part === '..')) {
     throw new StorageManagerError('对象路径前缀不能包含 . 或 .. 路径段')
   }
@@ -76,6 +78,7 @@ const webdavRequest = async (config, method, key = '', options = {}) => {
     headers: webdavHeaders(config, options.headers),
     body: options.body,
     redirect: 'follow',
+    signal: AbortSignal.timeout(30000),
     ...(options.body ? { duplex: 'half' } : {}),
   })
   return response
@@ -126,10 +129,12 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
 
     for (const key of allowed) {
       if (key === 'forcePathStyle' || key === 'useInternalEndpoint') {
-        config[key] = Object.hasOwn(source, key) ? Boolean(source[key]) : Boolean(current[key])
+        if (Object.hasOwn(source, key) && typeof source[key] !== 'boolean') throw new StorageManagerError(`${key} 必须是布尔值`)
+        config[key] = Object.hasOwn(source, key) ? source[key] : Boolean(current[key])
         continue
       }
       const value = Object.hasOwn(source, key) ? String(source[key] || '').trim() : ''
+      if (value.length > 2048) throw new StorageManagerError(`${key} 不能超过 2048 个字符`)
       config[key] = SECRET_FIELDS.has(key) && !value ? String(current[key] || '') : value || String(current[key] || '')
     }
 
@@ -200,10 +205,11 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
   `).all().map(mapProvider)
 
   const createProvider = ({ name, type, config }) => {
+    if (db.prepare("SELECT COUNT(*) AS count FROM storage_providers WHERE id <> 'local'").get().count >= 50) throw new StorageManagerError('最多可以添加 50 个外部存储服务', 409)
     const normalizedType = String(type || '').trim()
     if (!STORAGE_TYPES.has(normalizedType) || normalizedType === 'local') throw new StorageManagerError('不支持该存储类型')
     const normalizedName = String(name || '').trim()
-    if (normalizedName.length < 2) throw new StorageManagerError('存储名称至少需要 2 个字符')
+    if (normalizedName.length < 2 || normalizedName.length > 100) throw new StorageManagerError('存储名称需要 2 到 100 个字符')
     const normalizedConfig = normalizeConfig(normalizedType, config)
     const now = new Date().toISOString()
     const id = crypto.randomUUID()
@@ -216,7 +222,7 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
     if (id === 'local') throw new StorageManagerError('本地存储无需修改')
     const current = providerWithConfig(id)
     const normalizedName = String(name || current.name).trim()
-    if (normalizedName.length < 2) throw new StorageManagerError('存储名称至少需要 2 个字符')
+    if (normalizedName.length < 2 || normalizedName.length > 100) throw new StorageManagerError('存储名称需要 2 到 100 个字符')
     const normalizedConfig = normalizeConfig(current.type, config, current.config)
     db.prepare('UPDATE storage_providers SET name = ?, config_encrypted = ?, updated_at = ? WHERE id = ?')
       .run(normalizedName, encryptConfig(normalizedConfig), new Date().toISOString(), id)
@@ -304,15 +310,18 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
       body: 'PicNest storage connection test',
     })
     if (![200, 201, 204].includes(putResponse.status)) throw new StorageManagerError(`WebDAV 写入检测失败（HTTP ${putResponse.status}）`, 502)
+    let readError = null
     try {
       const getResponse = await webdavRequest(provider.config, 'GET', testKey)
       if (!getResponse.ok || await getResponse.text() !== 'PicNest storage connection test') {
         throw new StorageManagerError(`WebDAV 读取检测失败（HTTP ${getResponse.status}）`, 502)
       }
-    } finally {
-      const deleteResponse = await webdavRequest(provider.config, 'DELETE', testKey)
-      if (![200, 204].includes(deleteResponse.status)) throw new StorageManagerError(`WebDAV 删除检测失败（HTTP ${deleteResponse.status}）`, 502)
+    } catch (error) {
+      readError = error
     }
+    const deleteResponse = await webdavRequest(provider.config, 'DELETE', testKey)
+    if (![200, 204].includes(deleteResponse.status)) throw new StorageManagerError(`WebDAV 删除检测失败（HTTP ${deleteResponse.status}）`, 502)
+    if (readError) throw readError
   }
 
   const storageKeyFor = (provider, userId, filename) => {

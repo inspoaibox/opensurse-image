@@ -1,8 +1,9 @@
 import bcrypt from 'bcryptjs'
 import cookieParser from 'cookie-parser'
-import cors from 'cors'
 import Database from 'better-sqlite3'
 import express from 'express'
+import { rateLimit } from 'express-rate-limit'
+import helmet from 'helmet'
 import jwt from 'jsonwebtoken'
 import multer from 'multer'
 import fs from 'node:fs'
@@ -24,14 +25,32 @@ const projectRoot = path.resolve(__dirname, '..')
 const uploadsDir = path.join(__dirname, 'uploads')
 const dataDir = path.join(__dirname, 'data')
 const uploadTempDir = path.join(dataDir, 'tmp')
-const seedFile = path.join(dataDir, 'images.json')
 const databaseFile = path.resolve(process.env.PICNEST_DB_PATH || path.join(dataDir, 'picnest.db'))
 const secretFile = path.join(dataDir, '.session-secret')
+const isProduction = process.env.NODE_ENV === 'production'
 const configuredApiMonthlyLimit = Number(process.env.PICNEST_API_MONTHLY_LIMIT || 50000)
 const apiMonthlyLimit = Number.isFinite(configuredApiMonthlyLimit) && configuredApiMonthlyLimit > 0
   ? Math.floor(configuredApiMonthlyLimit)
   : 50000
 const configuredPublicUrl = String(process.env.PICNEST_PUBLIC_URL || '').trim().replace(/\/+$/, '')
+
+const validateProductionEnvironment = () => {
+  if (!isProduction) return
+  const sessionValue = String(process.env.PICNEST_SESSION_SECRET || '')
+  const storageValue = String(process.env.PICNEST_STORAGE_SECRET || '')
+  const invalidSecret = (value) => value.length < 32 || /replace-with|change-me|example/i.test(value)
+  if (invalidSecret(sessionValue)) throw new Error('生产环境必须配置至少 32 个字符的 PICNEST_SESSION_SECRET')
+  if (invalidSecret(storageValue)) throw new Error('生产环境必须配置独立且至少 32 个字符的 PICNEST_STORAGE_SECRET')
+  if (process.env.COOKIE_SECURE !== 'true') throw new Error('生产环境必须设置 COOKIE_SECURE=true')
+  try {
+    const url = new URL(configuredPublicUrl)
+    if (url.protocol !== 'https:') throw new Error('not https')
+  } catch {
+    throw new Error('生产环境必须配置有效的 HTTPS PICNEST_PUBLIC_URL')
+  }
+}
+
+validateProductionEnvironment()
 
 fs.mkdirSync(uploadsDir, { recursive: true })
 fs.mkdirSync(dataDir, { recursive: true })
@@ -48,6 +67,7 @@ const storageEncryptionSecret = process.env.PICNEST_STORAGE_SECRET || sessionSec
 const db = new Database(databaseFile)
 db.pragma('journal_mode = WAL')
 db.pragma('foreign_keys = ON')
+db.pragma('busy_timeout = 5000')
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
@@ -253,10 +273,8 @@ const managedImagePath = (row) => `/media/${row.id}/${encodeURIComponent(publicI
 const requestOrigin = (req) => {
   if (configuredPublicUrl) return configuredPublicUrl
   if (!req) return ''
-  const forwardedProtocol = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim()
-  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim()
-  const protocol = forwardedProtocol || req.protocol || 'http'
-  const host = forwardedHost || req.get('host')
+  const protocol = req.protocol || 'http'
+  const host = req.get('host')
   return host ? `${protocol}://${host}` : ''
 }
 const absolutePublicUrl = (url, req) => {
@@ -264,7 +282,7 @@ const absolutePublicUrl = (url, req) => {
   const origin = requestOrigin(req)
   return origin ? new URL(url, `${origin}/`).href : url
 }
-const escapeReferenceText = (value) => String(value).replace(/([\\\[\]])/g, '\\$1')
+const escapeReferenceText = (value) => String(value).replaceAll('\\', '\\\\').replaceAll('[', '\\[').replaceAll(']', '\\]')
 const escapeReferenceAttribute = (value) => String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 const parseStoredJson = (value) => {
   if (!value) return null
@@ -325,6 +343,11 @@ const decryptApiKeySecret = (value) => {
   return Buffer.concat([decipher.update(Buffer.from(encryptedValue, 'base64url')), decipher.final()]).toString('utf8')
 }
 const safeEmail = (value) => String(value || '').trim().toLowerCase()
+const validEmail = (value) => value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+const validPassword = (value) => value.length >= 8 && value.length <= 128
+const validDisplayName = (value) => value.length >= 2 && value.length <= 80
+const validAlbumName = (value) => value.length >= 1 && value.length <= 100
+const validImageName = (value) => value.length >= 1 && value.length <= 255
 
 const normalizeUploadFilename = (value) => {
   let name = String(value || 'image').split(/[\\/]/).pop() || 'image'
@@ -334,7 +357,9 @@ const normalizeUploadFilename = (value) => {
     && Buffer.from(decoded, 'utf8').toString('latin1') === name
 
   if (isMisdecodedUtf8) name = decoded
-  return name.replace(/[\u0000-\u001f\u007f]/g, '').trim().normalize('NFC') || 'image'
+  return Array.from(name)
+    .filter((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127)
+    .join('').trim().normalize('NFC') || 'image'
 }
 
 const repairStoredImageNames = db.transaction(() => {
@@ -463,25 +488,6 @@ const requireSessionAuth = (req, res, next) => {
   next()
 }
 
-const seedFirstWorkspace = (ownerId) => {
-  if (!fs.existsSync(seedFile)) return
-  const count = db.prepare('SELECT COUNT(*) AS count FROM images').get().count
-  if (count > 0) return
-  const seeds = JSON.parse(fs.readFileSync(seedFile, 'utf8'))
-  const insertImage = db.prepare(`
-    INSERT INTO images (id, owner_id, name, filename, url, type, mime_type, size, width, height, album, starred, views, created_at)
-    VALUES (@id, @ownerId, @name, NULL, @url, @type, @mimeType, @size, @width, @height, @album, @starred, @views, @createdAt)
-  `)
-  const insertAlbum = db.prepare('INSERT OR IGNORE INTO albums (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)')
-  const transaction = db.transaction(() => {
-    for (const image of seeds) {
-      insertImage.run({ ...image, ownerId, starred: image.starred ? 1 : 0 })
-      insertAlbum.run(crypto.randomUUID(), ownerId, image.album, new Date().toISOString())
-    }
-  })
-  transaction()
-}
-
 const createUser = ({ name, email, password, role, quota, storageProviderId = null }) => {
   const id = crypto.randomUUID()
   const createdAt = new Date().toISOString()
@@ -492,6 +498,11 @@ const createUser = ({ name, email, password, role, quota, storageProviderId = nu
   ensureDefaultAlbum(id)
   return mapUser(db.prepare('SELECT * FROM users WHERE id = ?').get(id))
 }
+
+const registerFirstUser = db.transaction(({ name, email, password }) => {
+  if (db.prepare('SELECT COUNT(*) AS count FROM users').get().count !== 0) return null
+  return createUser({ name, email, password, role: 'admin' })
+})
 
 const minUserQuota = 100 * 1024 ** 2
 const maxUserQuota = 100 * 1024 ** 4
@@ -563,9 +574,11 @@ const cleanupPendingFiles = (files) => {
   }
 }
 
+const uploadReservations = new Map()
 const persistUploadedFiles = async ({ files, user, album, request, guestUploaded = false, processingSettings = getImageProcessingSettings() }) => {
   const providerId = storageManager.getUploadProviderId(user.storageProviderId)
   const stored = []
+  let reservedBytes = 0
   try {
     const processed = []
     for (const file of files) {
@@ -575,7 +588,10 @@ const persistUploadedFiles = async ({ files, user, album, request, guestUploaded
 
     const used = Number(db.prepare('SELECT COALESCE(SUM(size), 0) AS used FROM images WHERE owner_id = ?').get(user.id).used)
     const processedSize = processed.reduce((sum, item) => sum + item.file.size, 0)
-    if (used + processedSize > user.quota) throw new ImageProcessingError('图片处理后的文件超过存储配额，请降低质量或清理空间后重试', 413)
+    const pendingSize = uploadReservations.get(user.id) || 0
+    if (used + pendingSize + processedSize > user.quota) throw new ImageProcessingError('图片处理后的文件超过存储配额，请降低质量或清理空间后重试', 413)
+    reservedBytes = processedSize
+    uploadReservations.set(user.id, pendingSize + reservedBytes)
 
     for (const { file, metadata, processing } of processed) {
       const location = await storageManager.storeFile(user.id, file, providerId)
@@ -631,18 +647,13 @@ const persistUploadedFiles = async ({ files, user, album, request, guestUploaded
     })))
     cleanupPendingFiles(files)
     throw error
+  } finally {
+    if (reservedBytes > 0) {
+      const remaining = (uploadReservations.get(user.id) || reservedBytes) - reservedBytes
+      if (remaining > 0) uploadReservations.set(user.id, remaining)
+      else uploadReservations.delete(user.id)
+    }
   }
-}
-
-const guestAttempts = new Map()
-const limitGuestUploads = (req, res, next) => {
-  const now = Date.now()
-  const key = req.ip || req.socket.remoteAddress || 'unknown'
-  const recent = (guestAttempts.get(key) || []).filter((time) => now - time < 60 * 60 * 1000)
-  if (recent.length >= 10) return res.status(429).json({ message: '游客上传过于频繁，请稍后再试' })
-  recent.push(now)
-  guestAttempts.set(key, recent)
-  next()
 }
 
 const allowGuestUpload = (req, res, next) => {
@@ -654,15 +665,69 @@ const allowGuestUpload = (req, res, next) => {
   next()
 }
 
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  handler: (_req, res) => res.status(429).json({ message: '登录尝试过于频繁，请 15 分钟后再试' }),
+})
+
+const guestUploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  handler: (_req, res) => res.status(429).json({ message: '游客上传过于频繁，请稍后再试' }),
+})
+
+const requireSameOriginSessionRequest = (req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method) || !req.cookies.picnest_session) return next()
+  if (req.get('sec-fetch-site') === 'cross-site') return res.status(403).json({ message: '拒绝跨站请求' })
+  const origin = req.get('origin')
+  if (!origin) return next()
+  try {
+    const expectedOrigin = new URL(requestOrigin(req)).origin
+    if (new URL(origin).origin !== expectedOrigin) return res.status(403).json({ message: '请求来源无效' })
+  } catch {
+    return res.status(403).json({ message: '请求来源无效' })
+  }
+  next()
+}
+
 const app = express()
 app.disable('x-powered-by')
 app.set('trust proxy', 'loopback')
-app.use(cors({ origin: true, credentials: true }))
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      baseUri: ["'self'"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'", 'data:'],
+      formAction: ["'self'"],
+      frameAncestors: ["'none'"],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      objectSrc: ["'none'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      upgradeInsecureRequests: isProduction ? [] : null,
+    },
+  },
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  strictTransportSecurity: isProduction ? undefined : false,
+}))
 app.use(express.json({ limit: '1mb' }))
+app.use((req, _res, next) => {
+  if (req.body === undefined) req.body = {}
+  next()
+})
 app.use(cookieParser())
-app.use('/uploads', express.static(uploadsDir, { maxAge: '7d' }))
-app.use('/demo', express.static(path.join(projectRoot, 'public', 'demo'), { maxAge: '7d' }))
-
+app.use(requireSameOriginSessionRequest)
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store')
+  next()
+})
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'PicNest', database: 'sqlite' }))
 
 const streamManagedImage = async (req, res) => {
@@ -684,6 +749,8 @@ const streamManagedImage = async (req, res) => {
     res.setHeader('Content-Type', object.contentType || image.mime_type || 'application/octet-stream')
     res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(publicImageFilename(image))}`)
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+    res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:")
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
     res.setHeader('ETag', etag)
     res.setHeader('X-Content-Type-Options', 'nosniff')
     if (Number.isFinite(Number(object.contentLength || image.size))) {
@@ -702,6 +769,8 @@ const streamManagedImage = async (req, res) => {
       cleanup()
       return res.end()
     }
+
+    db.prepare('UPDATE images SET views = views + 1 WHERE id = ?').run(image.id)
 
     res.once('finish', cleanup)
     res.once('close', cleanup)
@@ -731,7 +800,7 @@ app.get('/api/public/config', (_req, res) => {
   })
 })
 
-app.post('/api/public/images', allowGuestUpload, limitGuestUploads, guestUpload.array('files', 5), async (req, res) => {
+app.post('/api/public/images', allowGuestUpload, guestUploadLimiter, guestUpload.array('files', 5), async (req, res) => {
   const used = db.prepare('SELECT COALESCE(SUM(size), 0) AS used FROM images WHERE owner_id = ?').get(req.user.id).used
   const incoming = (req.files || []).reduce((sum, file) => sum + file.size, 0)
   if (!req.files?.length) return res.status(400).json({ message: '请选择需要上传的图片' })
@@ -760,26 +829,27 @@ app.get('/api/auth/me', (req, res) => {
   res.json(user)
 })
 
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', authLimiter, (req, res) => {
   const name = String(req.body.name || '').trim()
   const email = safeEmail(req.body.email)
   const password = String(req.body.password || '')
-  if (name.length < 2) return res.status(400).json({ message: '昵称至少需要 2 个字符' })
-  if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ message: '请输入有效的邮箱地址' })
-  if (password.length < 8) return res.status(400).json({ message: '密码至少需要 8 个字符' })
-  const isFirstUser = db.prepare('SELECT COUNT(*) AS count FROM users').get().count === 0
-  if (!isFirstUser) return res.status(403).json({ message: '系统已完成初始化，请联系管理员创建账户' })
-  const user = createUser({ name, email, password, role: 'admin' })
-  seedFirstWorkspace(user.id)
+  if (!validDisplayName(name)) return res.status(400).json({ message: '昵称需要 2 到 80 个字符' })
+  if (!validEmail(email)) return res.status(400).json({ message: '请输入有效的邮箱地址' })
+  if (!validPassword(password)) return res.status(400).json({ message: '密码需要 8 到 128 个字符' })
+  const user = registerFirstUser({ name, email, password })
+  if (!user) return res.status(403).json({ message: '系统已完成初始化，请联系管理员创建账户' })
   createSession(res, user)
   res.status(201).json(user)
 })
 
-app.post('/api/auth/login', (req, res) => {
+const dummyPasswordHash = bcrypt.hashSync(crypto.randomBytes(24).toString('hex'), 12)
+
+app.post('/api/auth/login', authLimiter, (req, res) => {
   const email = safeEmail(req.body.email)
   const password = String(req.body.password || '')
   const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email)
-  if (!row || !bcrypt.compareSync(password, row.password_hash)) return res.status(401).json({ message: '邮箱或密码不正确' })
+  const passwordMatches = bcrypt.compareSync(password.slice(0, 128), row?.password_hash || dummyPasswordHash)
+  if (!row || !passwordMatches || password.length > 128) return res.status(401).json({ message: '邮箱或密码不正确' })
   const user = mapUser(row)
   createSession(res, user)
   res.json(user)
@@ -790,8 +860,9 @@ app.post('/api/auth/logout', (_req, res) => {
   res.status(204).end()
 })
 
-app.patch('/api/settings/guest-upload', authenticate, requireAdmin, (req, res) => {
-  const enabled = Boolean(req.body.enabled)
+app.patch('/api/settings/guest-upload', authenticate, requireSessionAuth, requireAdmin, (req, res) => {
+  if (typeof req.body.enabled !== 'boolean') return res.status(400).json({ message: 'enabled 必须是布尔值' })
+  const enabled = req.body.enabled
   db.prepare('UPDATE app_settings SET value = ?, updated_at = ? WHERE key = ?')
     .run(enabled ? 'true' : 'false', new Date().toISOString(), 'guest_upload_enabled')
   res.json({ guestUploadEnabled: enabled })
@@ -801,42 +872,42 @@ app.get('/api/settings/image-processing', authenticate, (_req, res) => {
   res.json(getImageProcessingSettings())
 })
 
-app.patch('/api/settings/image-processing', authenticate, requireAdmin, (req, res) => {
+app.patch('/api/settings/image-processing', authenticate, requireSessionAuth, requireAdmin, (req, res) => {
   const settings = normalizeImageProcessingSettings(req.body || {}, getImageProcessingSettings())
   db.prepare('UPDATE app_settings SET value = ?, updated_at = ? WHERE key = ?')
     .run(JSON.stringify(settings), new Date().toISOString(), 'image_processing')
   res.json(settings)
 })
 
-app.get('/api/storage/providers', authenticate, (_req, res) => {
+app.get('/api/storage/providers', authenticate, requireSessionAuth, (_req, res) => {
   res.json(storageManager.listProviders())
 })
 
-app.post('/api/storage/providers', authenticate, requireAdmin, (req, res) => {
+app.post('/api/storage/providers', authenticate, requireSessionAuth, requireAdmin, (req, res) => {
   const provider = storageManager.createProvider(req.body || {})
   res.status(201).json(provider)
 })
 
-app.patch('/api/storage/providers/:id', authenticate, requireAdmin, (req, res) => {
+app.patch('/api/storage/providers/:id', authenticate, requireSessionAuth, requireAdmin, (req, res) => {
   res.json(storageManager.updateProvider(req.params.id, req.body || {}))
 })
 
-app.patch('/api/storage/providers/:id/default', authenticate, requireAdmin, async (req, res) => {
+app.patch('/api/storage/providers/:id/default', authenticate, requireSessionAuth, requireAdmin, async (req, res) => {
   await storageManager.testProvider(req.params.id)
   res.json(storageManager.setDefaultProvider(req.params.id))
 })
 
-app.post('/api/storage/providers/:id/test', authenticate, requireAdmin, async (req, res) => {
+app.post('/api/storage/providers/:id/test', authenticate, requireSessionAuth, requireAdmin, async (req, res) => {
   await storageManager.testProvider(req.params.id)
   res.json({ ok: true })
 })
 
-app.delete('/api/storage/providers/:id', authenticate, requireAdmin, (req, res) => {
+app.delete('/api/storage/providers/:id', authenticate, requireSessionAuth, requireAdmin, (req, res) => {
   storageManager.deleteProvider(req.params.id)
   res.status(204).end()
 })
 
-app.get('/api/users', authenticate, requireAdmin, (_req, res) => {
+app.get('/api/users', authenticate, requireSessionAuth, requireAdmin, (_req, res) => {
   const rows = db.prepare(`
     SELECT users.*, COUNT(images.id) AS image_count, COALESCE(SUM(images.size), 0) AS storage_used
     FROM users LEFT JOIN images ON images.owner_id = users.id
@@ -845,15 +916,16 @@ app.get('/api/users', authenticate, requireAdmin, (_req, res) => {
   res.json(rows.map((row) => ({ ...mapUser(row), imageCount: Number(row.image_count), storageUsed: Number(row.storage_used) })))
 })
 
-app.post('/api/users', authenticate, requireAdmin, (req, res) => {
+app.post('/api/users', authenticate, requireSessionAuth, requireAdmin, (req, res) => {
   const name = String(req.body.name || '').trim()
   const email = safeEmail(req.body.email)
   const password = String(req.body.password || '')
-  const role = req.body.role === 'admin' ? 'admin' : 'member'
+  if (!['admin', 'member'].includes(req.body.role)) return res.status(400).json({ message: '空间角色只能是管理员或普通成员' })
+  const role = req.body.role
   const defaultQuota = role === 'admin' ? 10 * 1024 ** 3 : 5 * 1024 ** 3
   const quota = normalizeUserQuota(req.body.quota, defaultQuota)
   const storageProviderId = normalizeStorageProviderId(req.body.storageProviderId)
-  if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 8) return res.status(400).json({ message: '请完整填写昵称、邮箱和至少 8 位密码' })
+  if (!validDisplayName(name) || !validEmail(email) || !validPassword(password)) return res.status(400).json({ message: '请填写 2 到 80 个字符的昵称、有效邮箱和 8 到 128 个字符的密码' })
   if (quota === null) return res.status(400).json({ message: '存储配额必须在 100 MB 到 100 TB 之间' })
   if (storageProviderId === undefined) return res.status(400).json({ message: '选择的存储策略不存在' })
   if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) return res.status(409).json({ message: '该邮箱已经存在' })
@@ -861,22 +933,23 @@ app.post('/api/users', authenticate, requireAdmin, (req, res) => {
   res.status(201).json({ ...user, imageCount: 0, storageUsed: 0 })
 })
 
-app.patch('/api/users/:id', authenticate, requireAdmin, (req, res) => {
+app.patch('/api/users/:id', authenticate, requireSessionAuth, requireAdmin, (req, res) => {
   const current = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id)
   if (!current) return res.status(404).json({ message: '用户不存在' })
 
   const name = Object.hasOwn(req.body, 'name') ? String(req.body.name || '').trim() : current.name
   const email = Object.hasOwn(req.body, 'email') ? safeEmail(req.body.email) : current.email
-  const role = Object.hasOwn(req.body, 'role') ? (req.body.role === 'admin' ? 'admin' : 'member') : current.role
+  if (Object.hasOwn(req.body, 'role') && !['admin', 'member'].includes(req.body.role)) return res.status(400).json({ message: '空间角色只能是管理员或普通成员' })
+  const role = Object.hasOwn(req.body, 'role') ? req.body.role : current.role
   const quota = normalizeUserQuota(req.body.quota, Number(current.quota))
   const storageProviderId = normalizeStorageProviderId(req.body.storageProviderId, current.storage_provider_id || null)
   const password = Object.hasOwn(req.body, 'password') ? String(req.body.password || '') : ''
 
-  if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ message: '请填写有效的成员称呼和登录邮箱' })
+  if (!validDisplayName(name) || !validEmail(email)) return res.status(400).json({ message: '请填写 2 到 80 个字符的成员称呼和有效登录邮箱' })
   if (req.params.id === req.user.id && role !== current.role) return res.status(400).json({ message: '不能修改自己的管理员角色' })
   if (quota === null) return res.status(400).json({ message: '存储配额必须在 100 MB 到 100 TB 之间' })
   if (storageProviderId === undefined) return res.status(400).json({ message: '选择的存储策略不存在' })
-  if (password && password.length < 8) return res.status(400).json({ message: '新密码至少需要 8 个字符' })
+  if (password && !validPassword(password)) return res.status(400).json({ message: '新密码需要 8 到 128 个字符' })
   if (db.prepare('SELECT 1 FROM users WHERE email = ? AND id <> ?').get(email, current.id)) return res.status(409).json({ message: '该邮箱已经存在' })
 
   const used = Number(db.prepare('SELECT COALESCE(SUM(size), 0) AS used FROM images WHERE owner_id = ?').get(current.id).used)
@@ -944,6 +1017,10 @@ app.get('/api/images/:id/metadata', authenticate, async (req, res) => {
 app.post('/api/images', authenticate, upload.array('files', 20), async (req, res) => {
   if (!req.files?.length) return res.status(400).json({ message: '请选择需要上传的图片' })
   const requestedAlbum = String(req.body.album || '').trim()
+  if (requestedAlbum && !validAlbumName(requestedAlbum)) {
+    cleanupPendingFiles(req.files)
+    return res.status(400).json({ message: '相册名称需要 1 到 100 个字符' })
+  }
   const album = requestedAlbum || ensureDefaultAlbum(req.user.id)
   const used = db.prepare('SELECT COALESCE(SUM(size), 0) AS used FROM images WHERE owner_id = ?').get(req.user.id).used
   const incoming = (req.files || []).reduce((sum, file) => sum + file.size, 0)
@@ -967,6 +1044,9 @@ app.patch('/api/images/:id', authenticate, (req, res) => {
   const name = Object.hasOwn(req.body, 'name') ? String(req.body.name).trim() : image.name
   const album = Object.hasOwn(req.body, 'album') ? String(req.body.album).trim() || '未分类' : image.album
   const starred = Object.hasOwn(req.body, 'starred') ? (req.body.starred ? 1 : 0) : image.starred
+  if (!validImageName(name)) return res.status(400).json({ message: '图片名称需要 1 到 255 个字符' })
+  if (!validAlbumName(album)) return res.status(400).json({ message: '相册名称需要 1 到 100 个字符' })
+  if (Object.hasOwn(req.body, 'starred') && typeof req.body.starred !== 'boolean') return res.status(400).json({ message: 'starred 必须是布尔值' })
   db.prepare('UPDATE images SET name = ?, album = ?, starred = ? WHERE id = ? AND owner_id = ?')
     .run(name, album, starred, req.params.id, req.user.id)
   db.prepare('INSERT OR IGNORE INTO albums (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)')
@@ -987,8 +1067,11 @@ app.delete('/api/images/:id', authenticate, async (req, res) => {
 })
 
 app.post('/api/images/bulk-delete', authenticate, async (req, res) => {
-  const ids = Array.isArray(req.body.ids) ? req.body.ids : []
-  const owned = db.prepare('SELECT * FROM images WHERE owner_id = ?').all(req.user.id).filter((image) => ids.includes(image.id))
+  if (!Array.isArray(req.body.ids) || req.body.ids.length === 0) return res.status(400).json({ message: '请选择需要删除的图片' })
+  if (req.body.ids.length > 500) return res.status(400).json({ message: '单次最多删除 500 张图片' })
+  const ids = new Set(req.body.ids.filter((id) => typeof id === 'string' && id.length <= 100))
+  if (!ids.size) return res.status(400).json({ message: '图片 ID 格式无效' })
+  const owned = db.prepare('SELECT * FROM images WHERE owner_id = ?').all(req.user.id).filter((image) => ids.has(image.id))
   for (const image of owned) await removeOwnedImage(image, req.user.id)
   res.json({ deleted: owned.length })
 })
@@ -1007,7 +1090,8 @@ app.get('/api/albums', authenticate, (req, res) => {
 
 app.post('/api/albums', authenticate, (req, res) => {
   const name = String(req.body.name || '').trim()
-  if (!name) return res.status(400).json({ message: '请输入相册名称' })
+  if (!validAlbumName(name)) return res.status(400).json({ message: '相册名称需要 1 到 100 个字符' })
+  if (db.prepare('SELECT COUNT(*) AS count FROM albums WHERE owner_id = ?').get(req.user.id).count >= 500) return res.status(409).json({ message: '每位用户最多创建 500 个相册' })
   try {
     const album = { id: crypto.randomUUID(), name, createdAt: new Date().toISOString() }
     db.prepare('INSERT INTO albums (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)').run(album.id, req.user.id, name, album.createdAt)
@@ -1044,6 +1128,7 @@ app.get('/api/api-keys', authenticate, requireSessionAuth, (req, res) => {
 app.post('/api/api-keys', authenticate, requireSessionAuth, (req, res) => {
   const label = String(req.body.label || '').trim()
   if (label.length < 2 || label.length > 50) return res.status(400).json({ message: '密钥名称需要 2 到 50 个字符' })
+  if (db.prepare('SELECT COUNT(*) AS count FROM api_keys WHERE user_id = ?').get(req.user.id).count >= 50) return res.status(409).json({ message: '每位用户最多创建 50 把 API 密钥' })
   const secret = `pn_live_${crypto.randomBytes(18).toString('base64url')}`
   const item = { id: crypto.randomUUID(), label, prefix: `${secret.slice(0, 15)}••••••••`, recoverable: true, createdAt: new Date().toISOString(), lastUsedAt: null }
   db.prepare('INSERT INTO api_keys (id, user_id, label, key_hash, key_prefix, secret_encrypted, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
@@ -1090,28 +1175,63 @@ app.get('/api/stats', authenticate, (req, res) => {
 })
 
 const distDir = path.join(projectRoot, 'dist')
+const renderStatusPage = (status, title, message) => `<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${status} · PicNest</title><style>html{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#f4f6f2;color:#1b2c2a}body{min-height:100vh;margin:0;display:grid;place-items:center;padding:24px}.card{width:min(520px,100%);box-sizing:border-box;background:#fff;border:1px solid #e2e8e3;border-radius:18px;padding:42px;box-shadow:0 18px 50px rgba(32,60,55,.08)}small{color:#e77856;font-weight:700}h1{margin:8px 0 10px;font-size:30px}p{color:#74817e;line-height:1.7}a{display:inline-flex;margin-top:12px;padding:11px 17px;border-radius:10px;background:#163b38;color:#fff;text-decoration:none}</style></head>
+<body><main class="card"><small>PicNest · ${status}</small><h1>${title}</h1><p>${message}</p><a href="/">返回首页</a></main></body></html>`
+
+app.use('/api', (_req, res) => res.status(404).json({ message: '接口不存在' }))
+
 if (fs.existsSync(distDir)) {
-  app.use(express.static(distDir))
-  app.get('*splat', (_req, res) => res.sendFile(path.join(distDir, 'index.html')))
+  app.use(express.static(distDir, { index: false }))
+  app.get('/', (_req, res) => res.sendFile(path.join(distDir, 'index.html')))
 }
+
+app.use((_req, res) => res.status(404).type('html').send(renderStatusPage(404, '页面不存在', '你访问的地址不存在、已移动或已经被删除。')))
 
 app.use((error, req, res, _next) => {
   cleanupPendingFiles(req.files)
+  if (error?.type === 'entity.too.large') return res.status(413).json({ message: '请求内容不能超过 1 MB' })
+  if (error instanceof SyntaxError && error?.status === 400 && Object.hasOwn(error, 'body')) return res.status(400).json({ message: 'JSON 请求内容格式错误' })
   if (error instanceof multer.MulterError) {
     const limit = req.path.startsWith('/api/public/') ? '10MB' : '20MB'
-    return res.status(400).json({ message: error.code === 'LIMIT_FILE_SIZE' ? `单张图片不能超过 ${limit}` : error.message })
+    const tooLarge = ['LIMIT_FILE_SIZE', 'LIMIT_FILE_COUNT'].includes(error.code)
+    const message = error.code === 'LIMIT_FILE_SIZE'
+      ? `单张图片不能超过 ${limit}`
+      : error.code === 'LIMIT_FILE_COUNT'
+        ? `单次上传图片数量超过限制`
+        : '上传请求格式不正确'
+    return res.status(tooLarge ? 413 : 400).json({ message })
   }
   if (error instanceof ImageProcessingError) return res.status(error.status).json({ message: error.message })
   if (error instanceof StorageManagerError) return res.status(error.status).json({ message: error.message })
-  if (req.path.startsWith('/api/storage/') || req.path.includes('/images')) {
+  const remoteStorageFailure = Boolean(error?.$metadata)
+    || ['AbortError', 'TimeoutError'].includes(error?.name)
+    || (error instanceof TypeError && (req.path.startsWith('/api/storage/') || req.path.includes('/images')))
+  if (remoteStorageFailure) {
     console.error(error)
-    return res.status(502).json({ message: '远程存储操作失败，请检查地址、区域、Bucket 和访问密钥' })
+    return res.status(502).json({ message: '远程存储操作失败，请检查地址、区域、Bucket、网络和访问密钥' })
   }
   console.error(error)
-  res.status(500).json({ message: '服务暂时不可用' })
+  if (req.path.startsWith('/api/') || req.path.startsWith('/media/')) return res.status(500).json({ message: '服务暂时不可用' })
+  res.status(500).type('html').send(renderStatusPage(500, '服务暂时不可用', '服务器处理请求时出现异常，请稍后重试。'))
 })
 
 const port = Number(process.env.PORT || 18765)
-app.listen(port, '127.0.0.1', () => {
+if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT 必须是 1 到 65535 之间的整数')
+const server = app.listen(port, '127.0.0.1', () => {
   console.log(`PicNest server running at http://127.0.0.1:${port} (${path.basename(databaseFile)})`)
 })
+
+let shuttingDown = false
+const shutdown = () => {
+  if (shuttingDown) return
+  shuttingDown = true
+  server.close(() => {
+    db.close()
+    process.exit(0)
+  })
+  setTimeout(() => process.exit(1), 10000).unref()
+}
+process.once('SIGINT', shutdown)
+process.once('SIGTERM', shutdown)

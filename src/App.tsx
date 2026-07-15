@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Album,
   ArrowRight,
@@ -6,7 +6,6 @@ import {
   BookOpen,
   Check,
   CheckCircle2,
-  CircleHelp,
   Clipboard,
   Cloud,
   Code2,
@@ -14,7 +13,6 @@ import {
   Download,
   Eye,
   EyeOff,
-  FileCode2,
   FolderPlus,
   Gauge,
   Grid2X2,
@@ -64,8 +62,17 @@ const extensionAccept = (extensions: string[]) => extensions.map((extension) => 
 const extensionSummary = (extensions: string[]) => extensions.map((extension) => extension.toUpperCase()).join('、')
 const uploadFileMatches = (file: File, extensions: string[]) => {
   const extension = file.name.split('.').pop()?.toLowerCase()
-  if (extension && extensions.includes(extension)) return true
-  return !file.name.includes('.') && file.type.startsWith('image/')
+  return Boolean(extension && file.name.includes('.') && extensions.includes(extension))
+}
+
+const validateUploadSelection = (files: File[], extensions: string[], maxFiles: number, maxFileSize: number) => {
+  if (!files.length) return '请选择需要上传的图片'
+  if (files.length > maxFiles) return `单次最多上传 ${maxFiles} 张图片`
+  const invalidType = files.find((file) => !uploadFileMatches(file, extensions))
+  if (invalidType) return `${invalidType.name} 的文件类型不在允许列表中`
+  const oversized = files.find((file) => file.size > maxFileSize)
+  if (oversized) return `${oversized.name} 超过 ${Math.round(maxFileSize / 1024 / 1024)} MB 限制`
+  return ''
 }
 
 const viewMeta: Record<ViewName, { title: string; eyebrow: string }> = {
@@ -124,13 +131,20 @@ const formatDateTime = (value: string) => new Date(value).toLocaleString('zh-CN'
 })
 
 const absoluteUrl = (url: string) => {
-  let baseUrl = window.location.origin
-  try {
-    baseUrl = window.localStorage.getItem('picnest-public-base-url')?.trim() || baseUrl
-  } catch {
-    // Browser storage can be unavailable in strict privacy modes.
-  }
-  return new URL(url, `${baseUrl.replace(/\/+$/, '')}/`).href
+  return new URL(url, `${window.location.origin}/`).href
+}
+
+const copyText = async (value: string) => {
+  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(value)
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  const copied = document.execCommand('copy')
+  textarea.remove()
+  if (!copied) throw new Error('copy failed')
 }
 
 const escapeHtmlAttribute = (value: string) => value
@@ -234,6 +248,7 @@ function App() {
   const [activeView, setActiveView] = useState<ViewName>('dashboard')
   const [user, setUser] = useState<User | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
+  const [authError, setAuthError] = useState('')
   const [setupRequired, setSetupRequired] = useState(false)
   const [guestUploadEnabled, setGuestUploadEnabled] = useState(false)
   const [allowedExtensions, setAllowedExtensions] = useState<string[]>(defaultAllowedExtensions)
@@ -243,37 +258,52 @@ function App() {
   const [galleryAlbum, setGalleryAlbum] = useState('全部相册')
   const [stats, setStats] = useState<Stats>(defaultStats)
   const [loading, setLoading] = useState(true)
+  const [dataError, setDataError] = useState('')
   const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [uploadResults, setUploadResults] = useState<ImageItem[]>([])
   const [shareImage, setShareImage] = useState<ImageItem | null>(null)
   const [toast, setToast] = useState('')
+  const toastTimer = useRef<number | null>(null)
 
-  const notify = (message: string) => {
+  const notify = useCallback((message: string) => {
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
     setToast(message)
-    window.setTimeout(() => setToast(''), 2600)
-  }
+    toastTimer.current = window.setTimeout(() => setToast(''), 2600)
+  }, [])
 
-  const loadData = async () => {
+  useEffect(() => () => {
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
+  }, [])
+
+  const loadData = useCallback(async () => {
     setLoading(true)
+    setDataError('')
     try {
       const [imageResponse, statsResponse, albumResponse] = await Promise.all([fetch('/api/images'), fetch('/api/stats'), fetch('/api/albums')])
-      if (!imageResponse.ok || !statsResponse.ok || !albumResponse.ok) throw new Error('加载失败')
+      if ([imageResponse, statsResponse, albumResponse].some((response) => response.status === 401)) {
+        setUser(null)
+        throw new Error('登录会话已失效，请重新登录')
+      }
+      if (!imageResponse.ok || !statsResponse.ok || !albumResponse.ok) throw new Error('空间数据加载失败')
       const [imageData, statsData, albumData]: [ImageItem[], Stats, AlbumItem[]] = await Promise.all([imageResponse.json(), statsResponse.json(), albumResponse.json()])
       setImages(imageData)
       setStats({ ...defaultStats, ...statsData })
       setAlbums(albumData)
       setSelectedUploadAlbum((current) => current && albumData.some((album) => album.name === current) ? current : '')
-    } catch {
-      notify('无法连接本地存储服务')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '空间数据加载失败'
+      setDataError(message)
+      notify(message)
     } finally {
       setLoading(false)
     }
-  }
+  }, [notify])
 
   useEffect(() => {
     const checkSession = async () => {
       try {
+        setAuthError('')
         const [response, publicConfigResponse] = await Promise.all([fetch('/api/auth/me'), fetch('/api/public/config')])
         if (publicConfigResponse.ok) {
           const publicConfig = await publicConfigResponse.json()
@@ -290,12 +320,14 @@ function App() {
         const currentUser: User = await response.json()
         setUser(currentUser)
         await loadData()
+      } catch {
+        setAuthError('无法连接 PicNest 服务，请确认后端已经启动。')
       } finally {
         setAuthLoading(false)
       }
     }
     void checkSession()
-  }, [])
+  }, [loadData])
 
   const handleAuthenticated = async (authenticatedUser: User) => {
     setUser(authenticatedUser)
@@ -319,6 +351,8 @@ function App() {
 
   const uploadFiles = async (files: File[], albumName = selectedUploadAlbum) => {
     if (!files.length || uploading) return
+    const validationError = validateUploadSelection(files, allowedExtensions, 20, 20 * 1024 * 1024)
+    if (validationError) return notify(validationError)
     setUploading(true)
     setUploadProgress(10)
     const ticker = window.setInterval(() => {
@@ -385,7 +419,7 @@ function App() {
       used: Math.max(0, current.used - removed.reduce((sum, item) => sum + item.size, 0)),
     }))
     setShareImage(null)
-    notify(`${removed.length} 张图片已移至回收站`)
+    notify(`${removed.length} 张图片已永久删除`)
   }
 
   const jumpToUpload = () => {
@@ -421,6 +455,7 @@ function App() {
   }
 
   const renderView = () => {
+    if (dataError) return <DataLoadError message={dataError} onRetry={() => void loadData()} />
     switch (activeView) {
       case 'gallery':
         return <GalleryView images={images} albums={albums} selectedAlbum={galleryAlbum} onAlbumChange={setGalleryAlbum} loading={loading} onShare={setShareImage} onPatch={patchImage} onDelete={deleteImages} />
@@ -450,7 +485,9 @@ function App() {
     }
   }
 
+  if (window.location.pathname !== '/') return <NotFoundPage />
   if (authLoading) return <AppLoading />
+  if (authError) return <ServiceErrorPage message={authError} />
   if (!user) return <AuthScreen setupRequired={setupRequired} guestUploadEnabled={guestUploadEnabled} allowedExtensions={allowedExtensions} onAuthenticated={handleAuthenticated} />
 
   return (
@@ -465,7 +502,9 @@ function App() {
           image={shareImage}
           onClose={() => setShareImage(null)}
           onPatch={patchImage}
-          onDelete={() => void deleteImages([shareImage.id])}
+          onDelete={() => {
+            if (window.confirm(`确认永久删除“${shareImage.name}”吗？此操作无法撤销。`)) void deleteImages([shareImage.id])
+          }}
           notify={notify}
         />
       )}
@@ -487,6 +526,18 @@ function AppLoading() {
       <i />
     </div>
   )
+}
+
+function ServiceErrorPage({ message }: { message: string }) {
+  return <main className="status-page"><section><span>503</span><h1>服务暂时不可用</h1><p>{message}</p><button className="button button-primary" onClick={() => window.location.reload()}>重新连接</button></section></main>
+}
+
+function NotFoundPage() {
+  return <main className="status-page"><section><span>404</span><h1>页面不存在</h1><p>你访问的地址不存在、已移动或已经被删除。</p><a className="button button-primary" href="/">返回首页</a></section></main>
+}
+
+function DataLoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return <div className="empty-state error-state"><span><Server size={28} /></span><h3>空间数据加载失败</h3><p>{message}</p><button className="button button-primary" onClick={onRetry}>重新加载</button></div>
 }
 
 function AuthScreen({ setupRequired, guestUploadEnabled, allowedExtensions, onAuthenticated }: { setupRequired: boolean; guestUploadEnabled: boolean; allowedExtensions: string[]; onAuthenticated: (user: User) => Promise<void> }) {
@@ -527,13 +578,14 @@ function AuthScreen({ setupRequired, guestUploadEnabled, allowedExtensions, onAu
         <div className="auth-security"><ShieldCheck size={17} /><span><b>数据完全由你掌控</b><small>独立账户 · 本地存储 · 安全隔离</small></span></div>
       </section>
       <section className="auth-panel">
+        <div className="auth-mobile-brand"><span className="brand-mark"><ImageIcon size={20} /></span><span><b>PicNest</b><small>图屿</small></span></div>
         {guestMode ? <GuestUploadPanel allowedExtensions={allowedExtensions} onBack={() => setGuestMode(false)} /> : <form className="auth-form" onSubmit={submit}>
           {setupRequired && <span className="setup-badge"><KeyRound size={14} /> 首位注册用户将成为系统管理员</span>}
           <div className="auth-heading"><h2>{mode === 'login' ? '欢迎回来' : '创建你的空间'}</h2><p>{mode === 'login' ? '登录后继续管理你的图片资产。' : '只需要一分钟，就能拥有自己的图床。'}</p></div>
           <div className="auth-mode-note">{setupRequired ? <><UserPlus size={15} /><span><b>初始化管理员</b><small>完成后可在成员管理中创建其他账户</small></span></> : <><Lock size={15} /><span><b>账户登录</b><small>新成员账户由空间管理员创建</small></span></>}</div>
-          {mode === 'register' && <label><span>你的称呼</span><div><Users size={17} /><input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" placeholder="例如：设计师小苏" required /></div></label>}
-          <label><span>邮箱地址</span><div><Mail size={17} /><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder="name@example.com" required /></div></label>
-          <label><span>密码</span><div><Lock size={17} /><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} placeholder="至少 8 个字符" minLength={8} required /></div></label>
+          {mode === 'register' && <label><span>你的称呼</span><div><Users size={17} /><input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" placeholder="例如：设计师小苏" minLength={2} maxLength={80} required /></div></label>}
+          <label><span>邮箱地址</span><div><Mail size={17} /><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder="name@example.com" maxLength={254} required /></div></label>
+          <label><span>密码</span><div><Lock size={17} /><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} placeholder="至少 8 个字符" minLength={8} maxLength={128} required /></div></label>
           {error && <p className="auth-error">{error}</p>}
           <button className="auth-submit" disabled={submitting}>{submitting ? '正在进入空间…' : mode === 'login' ? '登录 PicNest' : '创建账户并进入'}<ArrowRight size={17} /></button>
           <p className="auth-footnote">继续即表示你同意在此设备上安全保存登录会话。</p>
@@ -551,9 +603,11 @@ function GuestUploadPanel({ allowedExtensions, onBack }: { allowedExtensions: st
   const [results, setResults] = useState<ImageItem[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const uploadGuestFiles = async (files: File[]) => {
-    const images = files.slice(0, 5)
-    if (!images.length || uploading) return
+  const uploadGuestFiles = useCallback(async (files: File[]) => {
+    if (uploading) return
+    const validationError = validateUploadSelection(files, allowedExtensions, 5, 10 * 1024 * 1024)
+    if (validationError) return setError(validationError)
+    const images = files
     setUploading(true)
     setError('')
     try {
@@ -568,7 +622,7 @@ function GuestUploadPanel({ allowedExtensions, onBack }: { allowedExtensions: st
     } finally {
       setUploading(false)
     }
-  }
+  }, [allowedExtensions, uploading])
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
@@ -584,7 +638,7 @@ function GuestUploadPanel({ allowedExtensions, onBack }: { allowedExtensions: st
     }
     window.addEventListener('paste', handlePaste)
     return () => window.removeEventListener('paste', handlePaste)
-  }, [uploading, allowedExtensions])
+  }, [allowedExtensions, uploadGuestFiles])
 
   return (
     <div className="auth-form guest-form">
@@ -652,7 +706,6 @@ function Sidebar({ activeView, onChange, stats, user, onLogout }: { activeView: 
           <div className="mini-progress"><i style={{ width: `${Math.max(percentage, 4)}%` }} /></div>
           <small>{formatBytes(stats.used)} / {formatBytes(stats.limit)}</small>
         </div>
-        <button className="help-link"><CircleHelp size={18} /> 帮助与反馈</button>
         <div className="account-row">
           <span className="avatar">{user.name.slice(0, 1)}</span>
           <span><b>{user.name}</b><small>{user.role === 'admin' ? '管理员' : '空间成员'}</small></span>
@@ -671,12 +724,6 @@ function Header({ activeView, onUpload }: { activeView: ViewName; onUpload: () =
         <h1>{viewMeta[activeView].title}</h1>
       </div>
       <div className="header-actions">
-        <label className="global-search">
-          <Search size={17} />
-          <input placeholder="搜索图片、相册..." />
-          <kbd>⌘ K</kbd>
-        </label>
-        <button className="icon-button" aria-label="通知"><Bell size={19} /><i /></button>
         <button className="button button-primary" onClick={onUpload}><Upload size={17} /> 上传图片</button>
       </div>
     </header>
@@ -721,8 +768,12 @@ function DashboardView({
 
 function InlineUploadResults({ images, onClear, notify }: { images: ImageItem[]; onClear: () => void; notify: (message: string) => void }) {
   const copyAllDirectLinks = async () => {
-    await navigator.clipboard.writeText(images.map((image) => absoluteUrl(image.url)).join('\n'))
-    notify(`${images.length} 条图片直链已复制`)
+    try {
+      await copyText(images.map((image) => absoluteUrl(image.url)).join('\n'))
+      notify(`${images.length} 条图片直链已复制`)
+    } catch {
+      notify('复制失败，请逐条复制图片直链')
+    }
   }
 
   return (
@@ -843,6 +894,7 @@ function GalleryView({ images, albums, selectedAlbum, onAlbumChange, loading, on
   const [layout, setLayout] = useState<'grid' | 'list'>('grid')
   const [selected, setSelected] = useState<string[]>([])
   const albumOptions = useMemo(() => ['全部相册', ...Array.from(new Set([...albums.map((album) => album.name), ...images.map((image) => image.album)]))], [albums, images])
+  const typeOptions = useMemo(() => ['全部格式', ...Array.from(new Set(images.map((image) => image.type))).sort()], [images])
   const filtered = images.filter((image) => {
     const matchQuery = image.name.toLowerCase().includes(query.toLowerCase())
     const matchAlbum = selectedAlbum === '全部相册' || image.album === selectedAlbum
@@ -859,19 +911,19 @@ function GalleryView({ images, albums, selectedAlbum, onAlbumChange, loading, on
       <section className="gallery-toolbar section-card">
         <label className="gallery-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="按文件名搜索" /></label>
         <select value={selectedAlbum} onChange={(event) => onAlbumChange(event.target.value)} aria-label="筛选相册">{albumOptions.map((name) => <option key={name}>{name}</option>)}</select>
-        <select value={type} onChange={(event) => setType(event.target.value)} aria-label="筛选格式">{['全部格式', 'JPG', 'JPEG', 'PNG', 'WEBP', 'GIF', 'SVG'].map((name) => <option key={name}>{name}</option>)}</select>
+        <select value={type} onChange={(event) => setType(event.target.value)} aria-label="筛选格式">{typeOptions.map((name) => <option key={name}>{name}</option>)}</select>
         <div className="layout-toggle"><button className={layout === 'grid' ? 'active' : ''} onClick={() => setLayout('grid')} aria-label="网格视图"><Grid2X2 size={17} /></button><button className={layout === 'list' ? 'active' : ''} onClick={() => setLayout('list')} aria-label="列表视图"><List size={18} /></button></div>
       </section>
 
       <div className="gallery-summary">
         <div><h3>{filtered.length} 张图片</h3><p>{selectedAlbum === '全部相册' ? '你的全部图片资产' : `相册 · ${selectedAlbum}`}</p></div>
         {selected.length > 0 && (
-          <div className="bulk-actions"><span>已选择 {selected.length} 项</span><button onClick={() => { void onDelete(selected); setSelected([]) }}><Trash2 size={15} /> 删除</button><button onClick={() => setSelected([])}><X size={15} /> 取消</button></div>
+          <div className="bulk-actions"><span>已选择 {selected.length} 项</span><button onClick={() => { if (window.confirm(`确认永久删除选中的 ${selected.length} 张图片吗？此操作无法撤销。`)) { void onDelete(selected); setSelected([]) } }}><Trash2 size={15} /> 删除</button><button onClick={() => setSelected([])}><X size={15} /> 取消</button></div>
         )}
       </div>
 
       {loading ? <CardSkeletons /> : filtered.length === 0 ? (
-        <div className="empty-state"><span><ImageIcon size={28} /></span><h3>没有找到图片</h3><p>试试调整关键词或筛选条件。</p></div>
+        <div className="empty-state"><span><ImageIcon size={28} /></span><h3>{images.length ? '没有找到图片' : '图库还是空的'}</h3><p>{images.length ? '试试调整关键词或筛选条件。' : '前往工作台选择、拖曳或粘贴图片开始上传。'}</p></div>
       ) : layout === 'grid' ? (
         <div className="gallery-grid">
           {filtered.map((image) => <ImageCard key={image.id} image={image} onShare={onShare} onPatch={onPatch} selected={selected.includes(image.id)} onSelect={() => toggleSelect(image.id)} />)}
@@ -901,9 +953,6 @@ function ImageCard({ image, onShare, onPatch, compact = false, selected = false,
   selected?: boolean
   onSelect?: () => void
 }) {
-  const copyLink = async () => {
-    await navigator.clipboard.writeText(absoluteUrl(image.url))
-  }
   return (
     <article className={`image-card ${compact ? 'compact' : ''} ${selected ? 'selected' : ''}`}>
       <div className="image-preview">
@@ -913,7 +962,6 @@ function ImageCard({ image, onShare, onPatch, compact = false, selected = false,
         {!compact && <button className={`select-box card-select ${selected ? 'selected' : ''}`} onClick={onSelect}>{selected && <Check size={13} />}</button>}
         <div className="card-hover-actions">
           <button onClick={() => void onPatch(image.id, { starred: !image.starred })} aria-label="收藏"><Heart size={16} fill={image.starred ? 'currentColor' : 'none'} /></button>
-          <button onClick={() => void copyLink()} aria-label="复制链接"><Link2 size={16} /></button>
           <button onClick={() => onShare(image)} aria-label="分享"><Share2 size={16} /></button>
         </div>
       </div>
@@ -935,16 +983,25 @@ function AlbumsView({ albums, images, onOpenGallery, onAlbumCreated, onSetDefaul
 }) {
   const [showNewAlbum, setShowNewAlbum] = useState(false)
   const [newAlbum, setNewAlbum] = useState('')
+  const [creatingAlbum, setCreatingAlbum] = useState(false)
   const createAlbum = async () => {
     const value = newAlbum.trim()
-    if (!value) return
-    const response = await fetch('/api/albums', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: value }) })
-    const detail = await response.json().catch(() => ({ message: '创建失败' }))
-    if (!response.ok) return notify(detail.message)
-    onAlbumCreated(detail as AlbumItem)
-    setNewAlbum('')
-    setShowNewAlbum(false)
-    notify('新相册已创建')
+    if (!value || creatingAlbum) return
+    if (value.length > 100) return notify('相册名称不能超过 100 个字符')
+    setCreatingAlbum(true)
+    try {
+      const response = await fetch('/api/albums', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: value }) })
+      const detail = await response.json().catch(() => ({ message: '创建失败' }))
+      if (!response.ok) return notify(detail.message)
+      onAlbumCreated(detail as AlbumItem)
+      setNewAlbum('')
+      setShowNewAlbum(false)
+      notify('新相册已创建')
+    } catch {
+      notify('相册创建失败，请重试')
+    } finally {
+      setCreatingAlbum(false)
+    }
   }
   return (
     <div className="albums-page">
@@ -976,8 +1033,8 @@ function AlbumsView({ albums, images, onOpenGallery, onAlbumCreated, onSetDefaul
         <div className="modal-backdrop" onMouseDown={() => setShowNewAlbum(false)}>
           <div className="small-modal" onMouseDown={(event) => event.stopPropagation()}>
             <span className="modal-title-icon"><FolderPlus size={20} /></span><h3>新建相册</h3><p>为新相册取一个容易识别的名字。</p>
-            <label>相册名称<input autoFocus value={newAlbum} onChange={(event) => setNewAlbum(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void createAlbum()} placeholder="例如：夏日旅行" /></label>
-            <div><button className="button button-ghost" onClick={() => setShowNewAlbum(false)}>取消</button><button className="button button-primary" onClick={() => void createAlbum()}>创建相册</button></div>
+            <label>相册名称<input autoFocus value={newAlbum} maxLength={100} onChange={(event) => setNewAlbum(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void createAlbum()} placeholder="例如：夏日旅行" /></label>
+            <div><button className="button button-ghost" disabled={creatingAlbum} onClick={() => setShowNewAlbum(false)}>取消</button><button className="button button-primary" disabled={creatingAlbum || !newAlbum.trim()} onClick={() => void createAlbum()}>{creatingAlbum ? '正在创建…' : '创建相册'}</button></div>
           </div>
         </div>
       )}
@@ -1001,7 +1058,7 @@ function UsersView({ currentUser, notify, onUserUpdated }: { currentUser: User; 
     storageProviderId: '',
   })
 
-  const loadUsers = async () => {
+  const loadUsers = useCallback(async () => {
     try {
       const [usersResponse, storageResponse] = await Promise.all([fetch('/api/users'), fetch('/api/storage/providers')])
       if (!usersResponse.ok) throw new Error('load failed')
@@ -1012,9 +1069,9 @@ function UsersView({ currentUser, notify, onUserUpdated }: { currentUser: User; 
     } finally {
       setLoadingUsers(false)
     }
-  }
+  }, [notify])
 
-  useEffect(() => { void loadUsers() }, [])
+  useEffect(() => { void loadUsers() }, [loadUsers])
 
   const openCreateUser = () => {
     setEditingUser(null)
@@ -1106,9 +1163,9 @@ function UsersView({ currentUser, notify, onUserUpdated }: { currentUser: User; 
             <button type="button" className="modal-close" onClick={closeEditor} aria-label="关闭成员编辑"><X size={18} /></button>
             <span className="modal-title-icon">{editingUser ? <Pencil size={20} /> : <UserPlus size={20} />}</span><h3>{editingUser ? '编辑空间成员' : '添加空间成员'}</h3><p>{editingUser ? '更新成员账户与空间分配。' : '创建成员账户并分配初始空间。'}</p>
             <div className="member-form-grid">
-              <label>成员称呼<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：产品设计师" required minLength={2} /></label>
-              <label>登录邮箱<input type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="member@example.com" required /></label>
-              <label>{editingUser ? '新密码（可选）' : '初始密码'}<input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder={editingUser ? '留空不修改' : '至少 8 个字符'} required={!editingUser} minLength={form.password ? 8 : undefined} /></label>
+              <label>成员称呼<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：产品设计师" required minLength={2} maxLength={80} /></label>
+              <label>登录邮箱<input type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="member@example.com" maxLength={254} required /></label>
+              <label>{editingUser ? '新密码（可选）' : '初始密码'}<input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder={editingUser ? '留空不修改' : '至少 8 个字符'} required={!editingUser} minLength={form.password ? 8 : undefined} maxLength={128} /></label>
               <label>空间角色<select value={form.role} disabled={editingUser?.id === currentUser.id} onChange={(event) => setForm({ ...form, role: event.target.value as 'admin' | 'member' })}><option value="member">普通成员</option><option value="admin">管理员</option></select></label>
               <label>存储配额（GB）<input type="number" min="0.1" max="102400" step="0.1" value={form.quotaGb} onChange={(event) => setForm({ ...form, quotaGb: event.target.value })} required /></label>
               <label>存储策略<select value={form.storageProviderId} onChange={(event) => setForm({ ...form, storageProviderId: event.target.value })}><option value="">跟随系统当前存储</option>{storageProviders.map((provider) => <option value={provider.id} key={provider.id}>{provider.name}{provider.isDefault ? ' · 当前' : ''}</option>)}</select></label>
@@ -1124,12 +1181,12 @@ function UsersView({ currentUser, notify, onUserUpdated }: { currentUser: User; 
 function DeveloperView({ stats, notify }: { stats: Stats; notify: (message: string) => void }) {
   const [docsOpen, setDocsOpen] = useState(false)
   const [apiKeys, setApiKeys] = useState<ApiKeyItem[]>([])
+  const [keysLoading, setKeysLoading] = useState(true)
   const [keyLabel, setKeyLabel] = useState('')
   const [keySecrets, setKeySecrets] = useState<Record<string, string>>({})
   const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({})
   const [creatingKey, setCreatingKey] = useState(false)
   const [busyKeyId, setBusyKeyId] = useState('')
-  const [usage, setUsage] = useState(stats)
   useEffect(() => {
     fetch('/api/api-keys')
       .then(async (response) => {
@@ -1138,11 +1195,8 @@ function DeveloperView({ stats, notify }: { stats: Stats; notify: (message: stri
         setApiKeys(Array.isArray(detail) ? detail : [])
       })
       .catch(() => notify('密钥加载失败'))
-  }, [])
-  useEffect(() => { setUsage(stats) }, [stats])
-  useEffect(() => {
-    fetch('/api/stats').then((response) => response.ok ? response.json() : Promise.reject()).then((data) => setUsage({ ...defaultStats, ...data })).catch(() => notify('API 用量加载失败'))
-  }, [])
+      .finally(() => setKeysLoading(false))
+  }, [notify])
   const generateKey = async (event: React.FormEvent) => {
     event.preventDefault()
     const label = keyLabel.trim()
@@ -1196,8 +1250,12 @@ function DeveloperView({ stats, notify }: { stats: Stats; notify: (message: stri
   const copyKey = async (key: ApiKeyItem) => {
     const secret = await loadSecret(key)
     if (!secret) return
-    await navigator.clipboard.writeText(secret)
-    notify(`${key.label}已复制`)
+    try {
+      await copyText(secret)
+      notify(`${key.label}已复制`)
+    } catch {
+      notify('复制失败，请手动选择密钥内容')
+    }
   }
   const deleteKey = async (key: ApiKeyItem) => {
     if (!window.confirm(`确认删除 API 密钥“${key.label}”吗？删除后使用该密钥的程序会立即失效。`)) return
@@ -1218,21 +1276,29 @@ function DeveloperView({ stats, notify }: { stats: Stats; notify: (message: stri
       setBusyKeyId('')
     }
   }
-  const usageLimit = Math.max(1, usage.apiLimit || defaultStats.apiLimit)
-  const usagePercentage = Math.min(100, (usage.apiCalls / usageLimit) * 100)
-  const hasUsage = usage.apiCalls > 0
-  const copy = async (text: string, message: string) => { await navigator.clipboard.writeText(text); notify(message) }
+  const usageLimit = Math.max(1, stats.apiLimit || defaultStats.apiLimit)
+  const usagePercentage = Math.min(100, (stats.apiCalls / usageLimit) * 100)
+  const hasUsage = stats.apiCalls > 0
+  const copy = async (text: string, message: string) => {
+    try {
+      await copyText(text)
+      notify(message)
+    } catch {
+      notify('复制失败，请手动复制')
+    }
+  }
+  const apiBaseUrl = window.location.origin
   return (
     <div className="developer-page">
       <section className="api-hero">
         <div><span className="eyebrow-pill light"><Code2 size={13} /> PicNest API</span><h2>让图片进入你的工作流</h2><p>通过简单、稳定的 REST API 上传与管理图片。兼容 ShareX、PicGo 和自定义脚本。</p><button className="button button-light" onClick={() => setDocsOpen(true)}><BookOpen size={16} /> 阅读 API 文档</button></div>
-        <div className="api-terminal"><span><i className="red" /><i className="yellow" /><i className="green" /></span><pre><em>curl</em> -X POST {'\\'}{`\n`}  https://picnest.local/api/images {'\\'}{`\n`}  -H <b>"Authorization: Bearer $TOKEN"</b> {'\\'}{`\n`}  -F <strong>"files=@cover.png"</strong></pre></div>
+        <div className="api-terminal"><span><i className="red" /><i className="yellow" /><i className="green" /></span><pre><em>curl</em> -X POST {'\\'}{`\n`}  {apiBaseUrl}/api/images {'\\'}{`\n`}  -H <b>"Authorization: Bearer $TOKEN"</b> {'\\'}{`\n`}  -F <strong>"files=@cover.png"</strong></pre></div>
       </section>
       <div className="developer-grid">
         <section className="section-card api-key-card">
           <div className="section-heading"><div><h3>API 密钥</h3><p>可创建多把密钥，每把密钥仅能访问当前用户的数据</p></div><span className="status-pill">{apiKeys.length} 把</span></div>
-          <form className="api-key-create" onSubmit={generateKey}><input value={keyLabel} onChange={(event) => setKeyLabel(event.target.value)} placeholder="密钥名称，例如：PicGo、生产服务器" maxLength={50} /><button className="button button-primary" disabled={creatingKey}><Plus size={16} /> {creatingKey ? '创建中…' : '创建密钥'}</button></form>
-          {apiKeys.length === 0 ? <div className="api-key-empty"><KeyRound size={20} /><span><b>尚未创建 API 密钥</b><small>为不同设备或应用分别创建，停用时互不影响。</small></span></div> : <div className="api-key-list">{apiKeys.map((key) => {
+          <form className="api-key-create" onSubmit={generateKey}><input value={keyLabel} onChange={(event) => setKeyLabel(event.target.value)} placeholder="密钥名称，例如：PicGo、生产服务器" minLength={2} maxLength={50} required /><button className="button button-primary" disabled={creatingKey}><Plus size={16} /> {creatingKey ? '创建中…' : '创建密钥'}</button></form>
+          {keysLoading ? <div className="users-loading">正在载入 API 密钥…</div> : apiKeys.length === 0 ? <div className="api-key-empty"><KeyRound size={20} /><span><b>尚未创建 API 密钥</b><small>为不同设备或应用分别创建，停用时互不影响。</small></span></div> : <div className="api-key-list">{apiKeys.map((key) => {
             const visible = Boolean(visibleKeys[key.id] && keySecrets[key.id])
             const busy = busyKeyId === key.id
             return <div className="api-key-row" key={key.id}>
@@ -1247,7 +1313,7 @@ function DeveloperView({ stats, notify }: { stats: Stats; notify: (message: stri
           })}</div>}
           <small><Lock size={13} /> 完整密钥使用服务器密钥加密保存；删除后无法恢复。</small>
         </section>
-        <section className="section-card usage-card"><div className="section-heading"><div><h3>本月用量</h3><p>API 密钥调用额度</p></div><Gauge size={20} /></div><div className="usage-number"><b>{usage.apiCalls.toLocaleString()}</b><span>/ {usageLimit.toLocaleString()}</span></div><div className="usage-progress"><i style={{ width: `${usagePercentage}%` }} /></div><div><span>成功率 <b>{hasUsage ? `${usage.apiSuccessRate.toFixed(2)}%` : '--'}</b></span><span>平均响应 <b>{hasUsage ? `${usage.apiAverageResponseMs}ms` : '--'}</b></span><span>本月流量 <b>{formatBytes(usage.traffic)}</b></span></div></section>
+        <section className="section-card usage-card"><div className="section-heading"><div><h3>本月用量</h3><p>API 密钥调用额度</p></div><Gauge size={20} /></div><div className="usage-number"><b>{stats.apiCalls.toLocaleString()}</b><span>/ {usageLimit.toLocaleString()}</span></div><div className="usage-progress"><i style={{ width: `${usagePercentage}%` }} /></div><div><span>成功率 <b>{hasUsage ? `${stats.apiSuccessRate.toFixed(2)}%` : '--'}</b></span><span>平均响应 <b>{hasUsage ? `${stats.apiAverageResponseMs}ms` : '--'}</b></span><span>本月流量 <b>{formatBytes(stats.traffic)}</b></span></div></section>
       </div>
       <section className="section-card endpoints-card"><div className="section-heading"><div><h3>快速开始</h3><p>三个最常用的接口</p></div></div>{[
         ['POST', '/api/images', '上传一张或多张图片', 'post'],
@@ -1261,17 +1327,6 @@ function DeveloperView({ stats, notify }: { stats: Stats; notify: (message: stri
 
 function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, onAllowedExtensionsChange }: { notify: (message: string) => void; user: User; guestUploadEnabled: boolean; onGuestUploadChange: (enabled: boolean) => void; onAllowedExtensionsChange: (extensions: string[]) => void }) {
   type SettingsSection = 'storage' | 'security' | 'images' | 'notifications'
-  type PreferenceKey = 'loginAlerts' | 'apiAlerts' | 'uploadNotice' | 'quotaNotice' | 'securityNotice'
-  type SettingsPreferences = Record<PreferenceKey, boolean> & { domain: string }
-  const preferenceStorageKey = `picnest-preferences:${user.id}`
-  const defaults: SettingsPreferences = {
-    loginAlerts: true,
-    apiAlerts: true,
-    uploadNotice: true,
-    quotaNotice: true,
-    securityNotice: true,
-    domain: window.location.origin,
-  }
   const defaultImageProcessing: ImageProcessingSettings = {
     enabled: true,
     outputFormat: 'original',
@@ -1281,14 +1336,6 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
     allowedExtensions: defaultAllowedExtensions,
   }
   const [activeSection, setActiveSection] = useState<SettingsSection>('storage')
-  const [settings, setSettings] = useState<SettingsPreferences>(() => {
-    try {
-      const stored = window.localStorage.getItem(preferenceStorageKey)
-      return stored ? { ...defaults, ...(JSON.parse(stored) as Partial<SettingsPreferences>) } : defaults
-    } catch {
-      return defaults
-    }
-  })
   const [storageProviders, setStorageProviders] = useState<StorageProviderItem[]>([])
   const [storageLoading, setStorageLoading] = useState(true)
   const [storageModalOpen, setStorageModalOpen] = useState(false)
@@ -1298,7 +1345,7 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
   const [imageProcessingSaving, setImageProcessingSaving] = useState(false)
   const [newAllowedExtension, setNewAllowedExtension] = useState('')
 
-  const loadStorageProviders = async () => {
+  const loadStorageProviders = useCallback(async () => {
     setStorageLoading(true)
     try {
       const response = await fetch('/api/storage/providers')
@@ -1309,9 +1356,9 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
     } finally {
       setStorageLoading(false)
     }
-  }
+  }, [notify])
 
-  const loadImageProcessing = async () => {
+  const loadImageProcessing = useCallback(async () => {
     setImageProcessingLoading(true)
     try {
       const response = await fetch('/api/settings/image-processing')
@@ -1324,9 +1371,9 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
     } finally {
       setImageProcessingLoading(false)
     }
-  }
+  }, [notify, onAllowedExtensionsChange])
 
-  useEffect(() => { void loadStorageProviders(); void loadImageProcessing() }, [])
+  useEffect(() => { void loadStorageProviders(); void loadImageProcessing() }, [loadImageProcessing, loadStorageProviders])
 
   const testStorageProvider = async (provider: StorageProviderItem) => {
     const response = await fetch(`/api/storage/providers/${provider.id}/test`, { method: 'POST' })
@@ -1369,46 +1416,30 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
     notify(editingStorageProvider ? '存储配置已更新' : '存储服务已添加')
   }
 
-  const toggle = (key: PreferenceKey) => setSettings((current) => ({ ...current, [key]: !current[key] }))
   const sections = [
     { id: 'storage' as const, label: '存储与域名', icon: Server },
     { id: 'security' as const, label: '安全设置', icon: ShieldCheck },
     { id: 'images' as const, label: '图片处理', icon: ImageIcon },
     { id: 'notifications' as const, label: '通知', icon: Bell },
   ]
-  const saveSettings = async () => {
-    if (activeSection === 'images') {
-      if (user.role !== 'admin') return notify('仅管理员可以修改系统图片处理策略')
-      setImageProcessingSaving(true)
-      try {
-        const response = await fetch('/api/settings/image-processing', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(imageProcessing),
-        })
-        const detail = await response.json().catch(() => ({ message: '图片处理设置保存失败' }))
-        if (!response.ok) return notify(detail.message)
-        setImageProcessing(detail as ImageProcessingSettings)
-        onAllowedExtensionsChange((detail as ImageProcessingSettings).allowedExtensions)
-        notify('图片处理策略已保存，新上传立即生效')
-      } catch {
-        notify('图片处理设置保存失败，请重试')
-      } finally {
-        setImageProcessingSaving(false)
-      }
-      return
-    }
+  const saveImageProcessing = async () => {
+    if (user.role !== 'admin') return notify('仅管理员可以修改系统图片处理策略')
+    setImageProcessingSaving(true)
     try {
-      const parsedDomain = new URL(settings.domain)
-      if (!['http:', 'https:'].includes(parsedDomain.protocol)) throw new Error('invalid protocol')
-      const normalized = parsedDomain.href.replace(/\/$/, '')
-      const nextSettings = { ...settings, domain: normalized }
-      setSettings(nextSettings)
-      window.localStorage.setItem(preferenceStorageKey, JSON.stringify(nextSettings))
-      window.localStorage.setItem('picnest-public-base-url', normalized)
-      notify('当前设置已保存')
+      const response = await fetch('/api/settings/image-processing', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(imageProcessing),
+      })
+      const detail = await response.json().catch(() => ({ message: '图片处理设置保存失败' }))
+      if (!response.ok) return notify(detail.message)
+      setImageProcessing(detail as ImageProcessingSettings)
+      onAllowedExtensionsChange((detail as ImageProcessingSettings).allowedExtensions)
+      notify('图片处理策略已保存，新上传立即生效')
     } catch {
-      notify('请输入以 http:// 或 https:// 开头的有效域名')
+      notify('图片处理设置保存失败，请重试')
+    } finally {
+      setImageProcessingSaving(false)
     }
   }
   const updateGuestUpload = async () => {
@@ -1419,12 +1450,6 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
     onGuestUploadChange(enabled)
     notify(enabled ? '游客上传已开启' : '游客上传已关闭')
   }
-  const renderToggle = (key: PreferenceKey, title: string, description: string) => (
-    <div className="toggle-row" key={key}>
-      <span><b>{title}</b><small>{description}</small></span>
-      <button className={`switch ${settings[key] ? 'active' : ''}`} onClick={() => toggle(key)} aria-label={title} aria-pressed={settings[key]}><i /></button>
-    </div>
-  )
   const renderProcessingToggle = (key: 'enabled' | 'autoOrient' | 'stripMetadata', title: string, description: string) => (
     <div className="toggle-row" key={key}>
       <span><b>{title}</b><small>{description}</small></span>
@@ -1475,13 +1500,13 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
       {user.role === 'admin' && <button className="add-provider" onClick={() => { setEditingStorageProvider(null); setStorageModalOpen(true) }}><Plus size={17} /> 添加云存储或 WebDAV</button>}
       <div className="settings-note"><ShieldCheck size={15} /><span>切换只影响新上传；历史图片仍保留在原存储中，删除时会自动使用对应的存储配置。</span></div>
     </section>
-    <section className="section-card settings-card"><div className="settings-heading"><span className="metric-icon orange"><Link2 size={19} /></span><div><h3>访问域名</h3><p>生成图片直链和引用代码时使用</p></div></div><label className="setting-label">默认域名<div className="domain-input"><span>URL</span><input value={settings.domain} onChange={(event) => setSettings({ ...settings, domain: event.target.value })} placeholder="https://img.example.com" /></div></label></section>
+    <section className="section-card settings-card"><div className="settings-heading"><span className="metric-icon orange"><Link2 size={19} /></span><div><h3>访问域名</h3><p>图片直链由服务器生产配置统一生成</p></div><span className="status-pill">服务器配置</span></div><div className="settings-note"><Link2 size={15} /><span>当前浏览器地址：<code>{window.location.origin}</code>。生产环境请通过 <code>PICNEST_PUBLIC_URL</code> 设置唯一 HTTPS 公网域名，避免不同用户生成不一致的链接。</span></div></section>
   </>
 
   const renderSecuritySection = () => <>
     <div className="settings-section-intro"><span><ShieldCheck size={20} /></span><div><h2>安全设置</h2><p>查看账户身份、登录会话和安全提醒状态。</p></div></div>
     <section className="section-card settings-card"><div className="settings-heading"><span className="metric-icon green"><Lock size={19} /></span><div><h3>账户保护</h3><p>当前登录账户的身份与权限</p></div><span className="status-pill">受保护</span></div><div className="security-account"><span><Mail size={17} /></span><div><small>登录邮箱</small><b>{user.email}</b></div><em>{user.role === 'admin' ? '管理员' : '空间成员'}</em></div><div className="security-facts"><span><ShieldCheck size={15} /><b>HttpOnly Cookie</b><small>脚本无法读取会话令牌</small></span><span><Lock size={15} /><b>SameSite Lax</b><small>限制跨站请求携带登录态</small></span><span><KeyRound size={15} /><b>7 天会话</b><small>到期后需要重新登录</small></span></div></section>
-    <section className="section-card settings-card"><div className="settings-heading"><span className="metric-icon orange"><Bell size={19} /></span><div><h3>安全提醒</h3><p>控制需要在应用内提醒的账户事件</p></div></div>{renderToggle('loginAlerts', '异常登录提醒', '登录状态异常或会话失效时提醒')}{renderToggle('apiAlerts', 'API 密钥提醒', '创建或撤销 API 密钥时提醒')}</section>
+    <section className="section-card settings-card"><div className="settings-heading"><span className="metric-icon orange"><ShieldCheck size={19} /></span><div><h3>接口防护</h3><p>服务端强制执行的生产安全策略</p></div></div><div className="security-facts"><span><ShieldCheck size={15} /><b>同源写操作</b><small>网页登录写请求会校验请求来源</small></span><span><Lock size={15} /><b>登录限流</b><small>同一来源 15 分钟最多尝试 10 次</small></span><span><KeyRound size={15} /><b>密钥隔离</b><small>Bearer 密钥不能管理其他密钥</small></span></div></section>
   </>
 
   const renderImageSection = () => {
@@ -1513,9 +1538,9 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
   }
 
   const renderNotificationSection = () => <>
-    <div className="settings-section-intro"><span><Bell size={20} /></span><div><h2>通知</h2><p>选择需要在 PicNest 内显示的操作提醒。</p></div></div>
-    <section className="section-card settings-card"><div className="settings-heading"><span className="metric-icon orange"><Bell size={19} /></span><div><h3>应用内通知</h3><p>这些提醒只显示在当前浏览器中</p></div></div>{renderToggle('uploadNotice', '上传结果', '上传完成或失败时显示结果通知')}{renderToggle('quotaNotice', '空间用量', '存储空间接近配额时提醒')}{renderToggle('securityNotice', '账户安全', '登录与权限变更时显示提醒')}</section>
-    <section className="section-card settings-card"><div className="settings-heading"><span className="metric-icon blue"><Mail size={19} /></span><div><h3>邮件通知</h3><p>尚未配置邮件发送服务</p></div><span className="status-pill off">未接入</span></div><div className="settings-note"><Mail size={15} /><span>配置 SMTP 服务后，邮件通知选项将在这里启用。</span></div></section>
+    <div className="settings-section-intro"><span><Bell size={20} /></span><div><h2>通知</h2><p>当前版本提供即时的应用内操作反馈。</p></div></div>
+    <section className="section-card settings-card"><div className="settings-heading"><span className="metric-icon orange"><Bell size={19} /></span><div><h3>应用内通知</h3><p>上传、设置、密钥和异常状态会立即反馈</p></div><span className="status-pill">已启用</span></div><div className="settings-note"><Bell size={15} /><span>通知会在页面底部短暂显示，上传结果和引用地址会持续保留在工作台，直到你主动清空。</span></div></section>
+    <section className="section-card settings-card"><div className="settings-heading"><span className="metric-icon blue"><Mail size={19} /></span><div><h3>邮件通知</h3><p>当前版本不发送邮件，也不会收集 SMTP 凭据</p></div><span className="status-pill off">未提供</span></div></section>
   </>
 
   return (
@@ -1527,7 +1552,7 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
           {activeSection === 'security' && renderSecuritySection()}
           {activeSection === 'images' && renderImageSection()}
           {activeSection === 'notifications' && renderNotificationSection()}
-          <div className="save-settings"><button className="button button-primary" disabled={activeSection === 'images' && (imageProcessingLoading || imageProcessingSaving || user.role !== 'admin')} onClick={() => void saveSettings()}><Check size={16} /> {imageProcessingSaving ? '正在保存…' : activeSection === 'images' ? '保存图片处理策略' : '保存当前设置'}</button></div>
+          {activeSection === 'images' && <div className="save-settings"><button className="button button-primary" disabled={imageProcessingLoading || imageProcessingSaving || user.role !== 'admin'} onClick={() => void saveImageProcessing()}><Check size={16} /> {imageProcessingSaving ? '正在保存…' : '保存图片处理策略'}</button></div>}
         </div>
       </div>
       {storageModalOpen && <StorageProviderModal provider={editingStorageProvider} onClose={() => { setStorageModalOpen(false); setEditingStorageProvider(null) }} onSave={saveStorageProvider} />}
@@ -1596,7 +1621,7 @@ function StorageProviderModal({ provider, onClose, onSave }: {
         <h3>{editing ? '编辑存储服务' : '添加存储服务'}</h3>
         <p>连接信息会加密保存在本机 SQLite 中。</p>
         <div className="storage-form-grid">
-          <label><span>显示名称</span><input value={name} onChange={(event) => setName(event.target.value)} required minLength={2} /></label>
+          <label><span>显示名称</span><input value={name} onChange={(event) => setName(event.target.value)} required minLength={2} maxLength={100} /></label>
           <label><span>存储类型</span><select value={type} disabled={editing} onChange={(event) => changeType(event.target.value as StorageProviderType)}><option value="tencent-cos">腾讯云 COS</option><option value="aliyun-oss">阿里云 OSS</option><option value="huawei-obs">华为云 OBS</option><option value="webdav">WebDAV</option><option value="s3-compatible">S3 兼容存储</option></select></label>
           {isWebdav ? <>
             <label className="field-wide"><span>WebDAV 服务地址</span><input type="url" value={String(config.baseUrl)} onChange={(event) => setField('baseUrl', event.target.value)} placeholder="https://dav.example.com/remote.php/dav/files/user/picnest" required /></label>
@@ -1630,11 +1655,15 @@ function ReferenceFields({ image, notify }: { image: ImageItem; notify?: (messag
   }, [])
 
   const copy = async (key: string, label: string, value: string) => {
-    await navigator.clipboard.writeText(value)
-    setCopiedKey(key)
-    notify?.(`${label}已复制`)
-    if (clearTimer.current !== null) window.clearTimeout(clearTimer.current)
-    clearTimer.current = window.setTimeout(() => setCopiedKey(''), 1800)
+    try {
+      await copyText(value)
+      setCopiedKey(key)
+      notify?.(`${label}已复制`)
+      if (clearTimer.current !== null) window.clearTimeout(clearTimer.current)
+      clearTimer.current = window.setTimeout(() => setCopiedKey(''), 1800)
+    } catch {
+      notify?.('复制失败，请手动选择内容')
+    }
   }
 
   return <>{references.map(({ key, label, value }) => (
@@ -1662,7 +1691,14 @@ function ShareModal({ image, onClose, onPatch, onDelete, notify }: {
   const [metadataLoading, setMetadataLoading] = useState(false)
   const [metadataError, setMetadataError] = useState('')
   const direct = absoluteUrl(image.url)
-  const copy = async (value: string) => { await navigator.clipboard.writeText(value); notify('链接已复制到剪贴板') }
+  const copy = async (value: string) => {
+    try {
+      await copyText(value)
+      notify('链接已复制到剪贴板')
+    } catch {
+      notify('复制失败，请手动选择链接')
+    }
+  }
   const metadata = metadataResult?.imageId === image.id ? metadataResult.data : null
   const metadataSections = metadata ? buildMetadataSections(metadata.exif) : []
   const metadataFieldCount = metadataSections.reduce((sum, section) => sum + section.entries.length, 0)

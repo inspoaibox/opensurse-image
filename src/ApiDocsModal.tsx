@@ -8,7 +8,7 @@ const endpointGroups = [
       ['GET', '/api/health', '服务健康检查'],
       ['GET', '/api/public/config', '读取游客上传开关、限制与允许文件类型'],
       ['POST', '/api/public/images', '游客上传 1–5 张图片，需管理员开启'],
-      ['GET', '/api/auth/me', '读取当前认证用户与游客上传状态'],
+      ['GET', '/api/auth/me', '读取当前认证用户；未登录时返回初始化状态'],
       ['POST', '/api/auth/register', '仅系统未初始化时创建首位管理员'],
       ['POST', '/api/auth/login', '登录并写入 HttpOnly 会话 Cookie'],
       ['POST', '/api/auth/logout', '退出当前网页登录会话'],
@@ -55,14 +55,14 @@ const endpointGroups = [
   {
     title: '管理员接口',
     rows: [
-      ['GET / POST', '/api/users', '列出或创建成员'],
-      ['PATCH', '/api/users/:id', '编辑成员、配额与存储策略'],
-      ['PATCH', '/api/settings/guest-upload', '开启或关闭游客上传'],
-      ['PATCH', '/api/settings/image-processing', '修改允许上传类型与默认图片处理策略'],
-      ['GET / POST', '/api/storage/providers', '列出或添加存储服务'],
-      ['PATCH / DELETE', '/api/storage/providers/:id', '编辑或删除存储服务'],
-      ['POST', '/api/storage/providers/:id/test', '检测读取、写入和删除能力'],
-      ['PATCH', '/api/storage/providers/:id/default', '检测并设为系统当前存储'],
+      ['GET / POST', '/api/users', '列出或创建成员，仅管理员网页登录会话'],
+      ['PATCH', '/api/users/:id', '编辑成员、配额与存储策略，仅管理员网页登录会话'],
+      ['PATCH', '/api/settings/guest-upload', '开启或关闭游客上传，仅管理员网页登录会话'],
+      ['PATCH', '/api/settings/image-processing', '修改允许上传类型与默认图片处理策略，仅管理员网页登录会话'],
+      ['GET / POST', '/api/storage/providers', '列出或添加存储服务，仅网页登录会话；写操作要求管理员'],
+      ['PATCH / DELETE', '/api/storage/providers/:id', '编辑或删除存储服务，仅管理员网页登录会话'],
+      ['POST', '/api/storage/providers/:id/test', '检测读取、写入和删除能力，仅管理员网页登录会话'],
+      ['PATCH', '/api/storage/providers/:id/default', '检测并设为系统当前存储，仅管理员网页登录会话'],
     ],
   },
 ]
@@ -138,6 +138,7 @@ const errorStatuses = [
   ['422', '无法读取原文件元数据'],
   ['429', 'API 月度额度或频率超限'],
   ['502', '远程存储读取、写入或删除失败'],
+  ['500', '服务器内部异常'],
 ]
 
 const uploadCurlExample = (baseUrl: string) => `curl -X POST "${baseUrl}/api/images" \\
@@ -148,11 +149,6 @@ const uploadCurlExample = (baseUrl: string) => `curl -X POST "${baseUrl}/api/ima
   -F "format=webp" \\
   -F "quality=82" \\
   -F "stripMetadata=true"`
-
-const settingsCurlExample = (baseUrl: string) => `curl -X PATCH "${baseUrl}/api/settings/image-processing" \\
-  -H "Authorization: Bearer pn_live_xxx" \\
-  -H "Content-Type: application/json" \\
-  -d '{"allowedExtensions":["jpg","jpeg","png","gif","webp","svg","avif"]}'`
 
 const markdownCodeBlock = (language: string, content: string) => `\`\`\`${language}\n${content}\n\`\`\``
 const markdownTableCell = (value: string) => value.replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
@@ -187,7 +183,7 @@ const buildMarkdownDocs = (baseUrl: string) => {
     '',
     '自动化客户端在请求头中携带 Bearer 密钥。每把密钥只会访问其所属用户的图片、相册、配额和统计数据。',
     '',
-    markdownCodeBlock('http', 'Authorization: Bearer pn_live_xxxxxxxxxxxxxxxxxxxxxxxx'),
+    markdownCodeBlock('http', 'Authorization: Bearer $PICNEST_TOKEN'),
     '',
     '密钥的创建、查看与删除只能通过网页登录会话执行，不能使用 Bearer 密钥管理其他密钥。',
     '',
@@ -203,9 +199,7 @@ const buildMarkdownDocs = (baseUrl: string) => {
     '',
     markdownCodeBlock('json', imageProcessingSettingsExample),
     '',
-    '管理员可提交完整或部分设置；扩展名会转为小写、移除开头的点并自动去重，列表最多 32 项且不能为空。',
-    '',
-    markdownCodeBlock('bash', settingsCurlExample(baseUrl)),
+    '管理员可通过网页登录会话提交完整或部分设置；扩展名会转为小写、移除开头的点并自动去重，列表最多 32 项且不能为空。Bearer 密钥不能修改成员、存储和系统设置。',
     '',
     '上传接口始终返回数组，即使只上传一张。服务端会核对文件扩展名与二进制内容的真实格式、执行转换，并返回文件后缀、MIME 类型、处理结果和四种引用代码。游客上传不接受单次处理参数，始终使用系统默认策略和同一份白名单。',
     '',
@@ -262,13 +256,7 @@ function ApiCode({ children }: { children: string }) {
 
 export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
   const [allCopyState, setAllCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
-  let baseUrl = window.location.origin
-  try {
-    baseUrl = window.localStorage.getItem('picnest-public-base-url')?.trim() || baseUrl
-  } catch {
-    // Use the current origin when browser storage is unavailable.
-  }
-  baseUrl = baseUrl.replace(/\/+$/, '')
+  const baseUrl = window.location.origin.replace(/\/+$/, '')
 
   const copyAllMarkdown = async () => {
     try {
@@ -316,7 +304,7 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
           <section id="api-doc-auth">
             <h3>身份认证</h3>
             <p>自动化客户端在请求头中携带 Bearer 密钥。每把密钥只会访问其所属用户的图片、相册、配额和统计数据。</p>
-            <ApiCode>{`Authorization: Bearer pn_live_xxxxxxxxxxxxxxxxxxxxxxxx`}</ApiCode>
+            <ApiCode>{`Authorization: Bearer $PICNEST_TOKEN`}</ApiCode>
             <p>密钥的创建、查看与删除只能通过网页登录会话执行，不能使用 Bearer 密钥管理其他密钥。</p>
           </section>
 
@@ -327,8 +315,7 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
             <p>处理参数均可省略，省略时使用系统设置。<code>format</code> 支持 <code>default</code>、<code>original</code>、<code>jpg</code>、<code>png</code>、<code>webp</code>、<code>avif</code>；<code>quality</code> 为 1–100；<code>autoOrient</code> 和 <code>stripMetadata</code> 为布尔值。</p>
             <p>上传文件必须符合系统级 <code>allowedExtensions</code> 白名单，该白名单不能用单次请求覆盖。默认允许 <code>jpg</code>、<code>jpeg</code>、<code>png</code>、<code>gif</code>、<code>webp</code>、<code>svg</code>；请通过 <code>GET /api/public/config</code> 或 <code>GET /api/settings/image-processing</code> 读取当前值。</p>
             <ApiCode>{imageProcessingSettingsExample}</ApiCode>
-            <p>管理员可提交完整或部分设置；扩展名会转为小写、移除开头的点并自动去重，列表最多 32 项且不能为空。</p>
-            <ApiCode>{settingsCurlExample(baseUrl)}</ApiCode>
+            <p>管理员可通过网页登录会话提交完整或部分设置；扩展名会转为小写、移除开头的点并自动去重，列表最多 32 项且不能为空。Bearer 密钥不能修改成员、存储和系统设置。</p>
             <p>上传接口始终返回数组，即使只上传一张。服务端会核对文件扩展名与二进制内容的真实格式、执行转换，并返回文件后缀、MIME 类型、处理结果和四种引用代码。游客上传不接受单次处理参数，始终使用系统默认策略和同一份白名单。</p>
           </section>
 

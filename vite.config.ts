@@ -8,8 +8,7 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       '/api': 'http://127.0.0.1:18765',
-      '/media': 'http://127.0.0.1:18765',
-      '/uploads': 'http://127.0.0.1:18765'
+      '/media': 'http://127.0.0.1:18765'
     }
   }
 })
