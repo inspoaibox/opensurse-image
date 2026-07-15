@@ -706,10 +706,46 @@ systemd 查看 `sudo systemctl status picnest --no-pager`；PM2 查看 `sudo -u 
 
 数据库迁移会在服务启动时自动执行。升级前必须备份，以便在新版本迁移数据库后仍可回滚。
 
+### Git 部署：检查并拉取代码
+
+如果最初使用 `git clone` 安装，`/opt/picnest` 中应存在 `.git` 目录。先确认当前分支、远程仓库和本地工作区：
+
+```bash
+cd /opt/picnest
+test -d .git || { echo "当前不是 Git 部署，请改用下方压缩包升级流程"; exit 1; }
+
+sudo -u picnest -H git branch --show-current
+sudo -u picnest -H git remote -v
+sudo -u picnest -H git status --short
+```
+
+`git status --short` 没有输出才表示工作区干净。若有输出，不要直接拉取或删除这些文件；应先确认是否属于服务器本地修改并单独备份。
+
+仅检查远程是否有新版本，不修改本地代码：
+
+```bash
+cd /opt/picnest
+sudo -u picnest -H git fetch --prune origin
+sudo -u picnest -H git status --short --branch
+sudo -u picnest -H git log --oneline --decorate HEAD..@{upstream}
+```
+
+最后一条命令没有输出表示当前已经是最新版本；有输出时会列出等待拉取的提交。真正拉取代码使用：
+
+```bash
+cd /opt/picnest
+sudo -u picnest -H git pull --ff-only
+```
+
+`--ff-only` 会在服务器存在分叉提交时拒绝合并，避免生产服务器自动生成难以回滚的合并提交。拉取代码后还必须执行 `npm ci`、`npm run build` 并重启当前进程管理器，不能只执行 `git pull`。下面提供完整命令。
+
 ### Git 部署：systemd 更新流程
 
 ```bash
 cd /opt/picnest
+
+# 0. 服务停止前确认工作区干净
+test -z "$(sudo -u picnest -H git status --porcelain)" || { echo "工作区存在未提交修改，已停止升级"; exit 1; }
 
 # 1. 停止并备份
 sudo systemctl stop picnest
@@ -721,10 +757,10 @@ sudo cp /etc/picnest/picnest.env "/var/backups/picnest/picnest-env-${STAMP}"
 sudo cp /etc/systemd/system/picnest.service \
   "/var/backups/picnest/picnest-service-${STAMP}"
 
-# 2. 更新代码和依赖
-sudo -u picnest git pull --ff-only
-sudo -u picnest npm ci
-sudo -u picnest npm run build
+# 2. 拉取代码、更新依赖和前端
+sudo -u picnest -H git pull --ff-only
+sudo -u picnest -H npm ci
+sudo -u picnest -H npm run build
 
 # 3. 启动并验证
 sudo systemctl start picnest
@@ -743,6 +779,9 @@ sudo journalctl -u picnest -n 100 --no-pager
 ```bash
 cd /opt/picnest
 
+# 0. 服务停止前确认工作区干净
+test -z "$(sudo -u picnest -H git status --porcelain)" || { echo "工作区存在未提交修改，已停止升级"; exit 1; }
+
 # 1. 停止并备份
 sudo -u picnest -H pm2 stop picnest
 STAMP=$(date +%Y%m%d-%H%M%S)
@@ -753,10 +792,10 @@ sudo cp /etc/picnest/picnest.env "/var/backups/picnest/picnest-env-${STAMP}"
 sudo cp /etc/picnest/ecosystem.config.cjs \
   "/var/backups/picnest/picnest-ecosystem-${STAMP}.config.cjs"
 
-# 2. 更新代码、依赖和前端
-sudo -u picnest git pull --ff-only
-sudo -u picnest npm ci
-sudo -u picnest npm run build
+# 2. 拉取代码、更新依赖和前端
+sudo -u picnest -H git pull --ff-only
+sudo -u picnest -H npm ci
+sudo -u picnest -H npm run build
 
 # 3. 重新读取 ecosystem 和环境变量，再启动
 sudo -u picnest -H pm2 restart /etc/picnest/ecosystem.config.cjs --only picnest --update-env
