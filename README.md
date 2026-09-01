@@ -1,8 +1,8 @@
 # PicNest 图屿
 
-PicNest 是一个自托管、多用户的图片托管与资产管理系统。它支持粘贴、拖曳和批量选择上传，提供图库、相册、分享链接、用户权限、独立配额、API 密钥，以及可由管理员控制的游客上传。
+PicNest 是一个自托管、多用户的图片和视频托管与资产管理系统。它支持粘贴、拖曳和批量选择上传，提供图库、视频库、相册、分享链接、用户权限、独立配额、API 密钥，以及可由管理员控制的游客上传。
 
-图片可以保存在本机磁盘、腾讯云 COS、阿里云 OSS、华为云 OBS、WebDAV 或其他 S3 兼容对象存储中；账户、图片索引和加密后的存储配置保存在 SQLite。系统适合个人、工作室和小团队在自己的服务器上部署。
+图片和视频可以保存在本机磁盘、腾讯云 COS、阿里云 OSS、华为云 OBS、WebDAV 或其他 S3 兼容对象存储中；账户、媒体索引和加密后的存储配置保存在 SQLite。系统适合个人、工作室和小团队在自己的服务器上部署。
 
 ## 目录
 
@@ -28,8 +28,10 @@ PicNest 是一个自托管、多用户的图片托管与资产管理系统。它
 ## 主要功能
 
 - 粘贴、拖曳、单选和批量选择上传
+- 视频库支持 MP4、WebM、MOV、M4V、AVI、MKV 上传、在线播放、Range 断点播放和分享
 - 工作台可选择目标相册，未选择时自动进入用户设置的默认相册
 - 登录用户单张最大 20 MB，单次最多 20 张
+- 登录用户单个视频默认最大 500 MB，单次最多 10 个；视频与图片共用用户存储配额
 - 管理员、普通成员两种角色
 - 用户级图片、相册、配额、存储策略和 API 密钥隔离，支持为不同客户端创建多把独立密钥
 - 管理员可编辑成员资料、角色、密码、存储配额和目标存储服务
@@ -68,11 +70,11 @@ PicNest 是一个自托管、多用户的图片托管与资产管理系统。它
 必须持久化和备份的内容：
 
 - `server/data/picnest.db`
-- `server/uploads/`，仅本地存储的图片文件
+- `server/uploads/`，仅本地存储的图片和视频文件
 - `server/data/.session-secret`，或外部配置的 `PICNEST_SESSION_SECRET`
 - 外部配置的 `PICNEST_STORAGE_SECRET`
 
-远程对象本身还需要使用云厂商或 WebDAV 服务的版本控制、跨区域复制或备份能力单独保护。SQLite 只保存图片索引，不包含远程图片内容。
+远程对象本身还需要使用云厂商或 WebDAV 服务的版本控制、跨区域复制或备份能力单独保护。SQLite 只保存媒体索引，不包含远程图片或视频内容。
 
 ## 运行要求
 
@@ -288,6 +290,7 @@ PM2 模板默认使用 `/usr/bin/node`。如果 `command -v node` 返回其他�
 | `PICNEST_DB_PATH` | `server/data/picnest.db` | SQLite 数据库路径，生产环境建议使用绝对路径 |
 | `PICNEST_SESSION_SECRET` | 开发环境自动生成 | JWT 会话签名密钥；`NODE_ENV=production` 时必须显式配置至少 32 个字符并备份 |
 | `PICNEST_STORAGE_SECRET` | 开发环境使用会话密钥 | 云存储、WebDAV 凭据和可查看 API 密钥的加密密钥；生产环境必须独立配置至少 32 个字符，投入使用后不可更换 |
+| `PICNEST_VIDEO_MAX_MB` | `500` | 登录用户单个视频的大小上限，单位 MB；单次最多上传 10 个 |
 | `PICNEST_API_MONTHLY_LIMIT` | `50000` | 每位用户的月度 API 密钥调用额度，达到上限后返回 `429` |
 | `PICNEST_PUBLIC_URL` | 开发环境根据请求识别 | 对外访问根地址，例如 `https://img.example.com`；生产环境必须配置有效的 HTTPS 地址 |
 | `COOKIE_SECURE` | `false` | `NODE_ENV=production` 时必须设为 `true`；纯 HTTP 本地测试保持 `false` |
@@ -323,9 +326,9 @@ npm start
 - “设为当前”会写入、读取并删除一个很小的检测对象，确认上传、浏览和删除权限都正常后才完成切换。
 - 未指定用户存储策略时，登录用户、API 密钥上传和开启后的游客上传都会使用系统当前存储。
 - 管理员可以在“成员管理”中把某位用户固定到指定存储服务；用户策略优先于系统当前存储。
-- 切换只影响新上传，历史图片仍保存在原存储；每张图片会记录自己的存储服务和对象键。
-- 删除历史图片时，系统会使用该图片对应的原存储配置删除对象。
-- 仍被图片引用、分配给用户、正在使用或属于本地文件系统的存储配置不能删除。
+- 切换只影响新上传，历史图片和视频仍保存在原存储；每个媒体文件会记录自己的存储服务和对象键。
+- 删除历史图片或视频时，系统会使用该文件对应的原存储配置删除对象。
+- 仍被图片或视频引用、分配给用户、正在使用或属于本地文件系统的存储配置不能删除。
 
 ### 用户配额与存储策略
 
@@ -595,7 +598,7 @@ Caddy 默认会传递 `X-Forwarded-For` 和 `X-Forwarded-Proto`。PicNest 只信
 1. 打开 `https://你的实际域名`，确认页面显示“创建你的空间”。
 2. 创建首个账户；该账户自动成为管理员，公开注册接口随后自动关闭。
 3. 登录后打开“系统设置”，确认存储服务、上传类型白名单和游客上传状态；游客上传默认关闭。
-4. 上传一张测试图片，确认缩略图可以打开，直链、Markdown、HTML 和 BBCode 地址均使用实际公网域名。
+4. 上传一张测试图片和一个测试视频，确认缩略图、在线播放、进度拖动，以及直链、Markdown、HTML 和 BBCode 地址均使用实际公网域名。
 5. 打开“成员管理”创建普通成员，并按需要设置配额和存储策略。
 6. 打开“开发者”创建测试 API 密钥，按页面文档执行一次上传，再删除不再使用的测试密钥。
 
@@ -1019,6 +1022,8 @@ curl -X POST https://img.example.com/api/images \
 
 图片对象包含 `filename`、绝对 `url`、相对 `path`、`type`、`format`、`extension`、`mimeType`、持久化的 `processing` 处理结果，以及 `links.direct`、`links.markdown`、`links.bbcode`、`links.html` 四种完整引用。生产环境应配置 `PICNEST_PUBLIC_URL=https://img.example.com`，避免反向代理环境下返回内部地址。
 
+视频库通过独立接口管理视频，视频与图片共用用户配额和存储服务。支持 `mp4`、`webm`、`mov`、`m4v`、`avi`、`mkv`，服务端按原始字节保存，不经过 Sharp 图片处理。视频直链公开可读取，响应支持 `Accept-Ranges: bytes`；浏览器可以使用 `Range` 请求进行按需加载、进度拖动和断点播放。视频对象同样返回 `filename`、`url`、`path`、`type`、`format`、`extension`、`mimeType`、`size`、`links` 和 `createdAt`，并提供 HTML5 `<video>` 引用。
+
 系统图片处理默认开启、默认保持原格式。管理员可在“系统设置 → 图片处理”中设置输出为 JPEG、PNG、WebP 或 AVIF，调整 1–100 的转换质量，并配置 EXIF 自动旋转和元数据清理。
 
 同一页面还维护系统级上传扩展名白名单，默认包含 `jpg`、`jpeg`、`png`、`gif`、`webp`、`svg`。管理员可以增删 1–12 位字母或数字组成的扩展名，最多 32 项且至少保留一项。该白名单同时用于工作台选择、拖拽、粘贴、登录 API 和游客上传；服务端不会信任浏览器或请求提供的 MIME 类型，而会校验图片二进制内容。当前白名单可通过 `GET /api/public/config` 的 `allowedExtensions` 或 `GET /api/settings/image-processing` 读取。
@@ -1047,6 +1052,10 @@ API 上传可使用 multipart 字段 `format`、`quality`、`autoOrient`、`stri
 | `GET` | `/api/images/:id/metadata` | 图片所有者 | 按需读取并补提取完整图片元数据 |
 | `PATCH/DELETE` | `/api/images/:id` | 图片所有者 | 修改或删除图片 |
 | `POST` | `/api/images/bulk-delete` | 图片所有者 | 批量删除 |
+| `GET/POST` | `/api/videos` | 用户/API 密钥 | 视频列表或上传，单次最多 10 个 |
+| `GET` | `/api/videos/:id` | 视频所有者 | 读取单个视频的完整对象与引用地址 |
+| `PATCH/DELETE` | `/api/videos/:id` | 视频所有者 | 修改名称或收藏状态、删除视频 |
+| `POST` | `/api/videos/bulk-delete` | 视频所有者 | 批量删除视频 |
 | `GET/POST` | `/api/albums` | 用户/API 密钥 | 相册列表或创建 |
 | `PATCH` | `/api/albums/:id/default` | 相册所有者 | 设置默认相册 |
 | `GET/POST` | `/api/api-keys` | 用户会话 | 查看密钥列表或创建新密钥 |
@@ -1062,7 +1071,7 @@ API 上传可使用 multipart 字段 `format`、`quality`、`autoOrient`、`stri
 | `PATCH` | `/api/storage/providers/:id/default` | 管理员会话 | 检测并切换当前存储 |
 | `GET` | `/api/stats` | 用户/API 密钥 | 当前用户空间统计 |
 
-公开图片由 `GET /media/:id/:filename.ext` 返回，响应包含实际 `Content-Type`、UTF-8 文件名、缓存头和 ETag；旧的 `/media/:id` 地址继续兼容。完整交互式文档可在登录后的“开发者 → 阅读 API 文档”中查看。
+公开图片由 `GET /media/:id/:filename.ext` 返回，视频由 `GET /media/video/:id/:filename.ext` 返回；两者都包含实际 `Content-Type`、UTF-8 文件名、缓存头和 ETag。视频媒体地址额外支持 `Range` 请求并返回 `206 Partial Content`，旧的无文件名地址继续兼容。完整交互式文档可在登录后的“开发者 → 阅读 API 文档”中查看。
 
 ## 常见问题
 

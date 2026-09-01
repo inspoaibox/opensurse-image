@@ -1,4 +1,4 @@
-export type ViewName = 'dashboard' | 'gallery' | 'albums' | 'users' | 'developer' | 'settings'
+export type ViewName = 'dashboard' | 'gallery' | 'videos' | 'albums' | 'users' | 'developer' | 'settings'
 
 export interface User {
   id: string
@@ -12,6 +12,7 @@ export interface User {
 
 export interface UserSummary extends User {
   imageCount: number
+  videoCount: number
   storageUsed: number
 }
 
@@ -60,6 +61,7 @@ export interface StorageProviderItem {
     password: boolean
   }
   imageCount: number
+  videoCount: number
   createdAt: string
   updatedAt: string
 }
@@ -99,6 +101,27 @@ export interface ImageItem {
   createdAt: string
 }
 
+export interface VideoItem {
+  id: string
+  name: string
+  filename?: string
+  url: string
+  path?: string
+  type: string
+  format?: string
+  extension?: string
+  mimeType: string
+  size: number
+  views: number
+  links?: {
+    direct: string
+    markdown: string
+    bbcode: string
+    html: string
+  }
+  createdAt: string
+}
+
 export interface ImageProcessingSettings {
   enabled: boolean
   outputFormat: 'original' | 'jpg' | 'png' | 'webp' | 'avif'
@@ -116,6 +139,7 @@ export interface ImageMetadata {
 
 export interface Stats {
   images: number
+  videos: number
   used: number
   limit: number
   traffic: number

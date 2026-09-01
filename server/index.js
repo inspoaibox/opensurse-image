@@ -28,6 +28,10 @@ const uploadTempDir = path.join(dataDir, 'tmp')
 const databaseFile = path.resolve(process.env.PICNEST_DB_PATH || path.join(dataDir, 'picnest.db'))
 const secretFile = path.join(dataDir, '.session-secret')
 const isProduction = process.env.NODE_ENV === 'production'
+const configuredVideoMaxMb = Number(process.env.PICNEST_VIDEO_MAX_MB || 500)
+const videoMaxBytes = Number.isFinite(configuredVideoMaxMb) && configuredVideoMaxMb > 0
+  ? Math.floor(configuredVideoMaxMb * 1024 * 1024)
+  : 500 * 1024 * 1024
 const configuredApiMonthlyLimit = Number(process.env.PICNEST_API_MONTHLY_LIMIT || 50000)
 const apiMonthlyLimit = Number.isFinite(configuredApiMonthlyLimit) && configuredApiMonthlyLimit > 0
   ? Math.floor(configuredApiMonthlyLimit)
@@ -112,6 +116,25 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_images_owner_created ON images(owner_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS videos (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    filename TEXT,
+    storage_provider_id TEXT,
+    storage_key TEXT,
+    url TEXT NOT NULL,
+    type TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    size INTEGER NOT NULL DEFAULT 0,
+    album TEXT NOT NULL DEFAULT '视频',
+    starred INTEGER NOT NULL DEFAULT 0,
+    views INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_videos_owner_created ON videos(owner_id, created_at DESC);
 
   CREATE TABLE IF NOT EXISTS albums (
     id TEXT PRIMARY KEY,
@@ -253,6 +276,21 @@ const mimeTypesByFormat = {
   bmp: 'image/bmp',
   ico: 'image/x-icon',
 }
+const videoMimeTypesByFormat = {
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mov: 'video/quicktime',
+  m4v: 'video/x-m4v',
+  avi: 'video/x-msvideo',
+  mkv: 'video/x-matroska',
+}
+const allowedVideoExtensions = Object.freeze(Object.keys(videoMimeTypesByFormat))
+const videoFormatFor = (row) => {
+  const storedType = String(row.type || '').trim().toLowerCase().replace(/^video\//, '').replace(/^\./, '')
+  if (allowedVideoExtensions.includes(storedType)) return storedType
+  const filenameExtension = path.extname(row.filename || row.name || '').slice(1).toLowerCase()
+  return allowedVideoExtensions.includes(filenameExtension) ? filenameExtension : ''
+}
 const normalizeImageFormat = (value) => {
   const normalized = String(value || '').trim().toLowerCase().replace(/^image\//, '').replace(/^\./, '')
   return formatAliases[normalized] || normalized || 'image'
@@ -270,6 +308,15 @@ const publicImageFilename = (row) => {
   return `${path.basename(original, currentExtension)}${extension}`
 }
 const managedImagePath = (row) => `/media/${row.id}/${encodeURIComponent(publicImageFilename(row))}`
+const publicVideoFilename = (row) => {
+  const name = normalizeUploadFilename(row.name || row.filename || `video-${row.id}`)
+  const format = videoFormatFor(row)
+  const currentExtension = path.extname(name).slice(1).toLowerCase()
+  if (!format || currentExtension === format) return name
+  const stem = path.basename(name, path.extname(name))
+  return `${stem}.${format}`
+}
+const managedVideoPath = (row) => `/media/video/${row.id}/${encodeURIComponent(publicVideoFilename(row))}`
 const requestOrigin = (req) => {
   if (configuredPublicUrl) return configuredPublicUrl
   if (!req) return ''
@@ -327,6 +374,36 @@ const mapImage = (row, req) => {
   }
 }
 
+const mapVideo = (row, req) => {
+  const name = normalizeUploadFilename(row.name)
+  const format = videoFormatFor(row)
+  const filename = publicVideoFilename(row)
+  const relativeUrl = row.storage_provider_id && (row.storage_key || row.filename) ? managedVideoPath(row) : row.url
+  const url = absolutePublicUrl(relativeUrl, req)
+  return {
+    id: row.id,
+    name,
+    filename,
+    url,
+    path: relativeUrl,
+    type: format.toUpperCase(),
+    format,
+    extension: path.extname(filename).toLowerCase() || `.${format}`,
+    mimeType: videoMimeTypesByFormat[format] || row.mime_type || 'video/mp4',
+    size: Number(row.size),
+    album: row.album || '视频',
+    starred: Boolean(row.starred),
+    views: Number(row.views),
+    links: {
+      direct: url,
+      markdown: `[${escapeReferenceText(name)}](${url})`,
+      bbcode: `[video]${url}[/video]`,
+      html: `<video controls preload="metadata" src="${escapeReferenceAttribute(url)}"></video>`,
+    },
+    createdAt: row.created_at,
+  }
+}
+
 const hashApiKey = (value) => crypto.createHash('sha256').update(value).digest('hex')
 const apiKeyEncryptionKey = crypto.createHash('sha256').update(String(storageEncryptionSecret)).digest()
 const encryptApiKeySecret = (value) => {
@@ -348,6 +425,20 @@ const validPassword = (value) => value.length >= 8 && value.length <= 128
 const validDisplayName = (value) => value.length >= 2 && value.length <= 80
 const validAlbumName = (value) => value.length >= 1 && value.length <= 100
 const validImageName = (value) => value.length >= 1 && value.length <= 255
+
+const validateVideoFilename = (filename, mimetype = '') => {
+  const normalizedFilename = String(filename || '')
+  if (normalizedFilename.length > 255) throw new ImageProcessingError('视频文件名不能超过 255 个字符', 400)
+  const extension = path.extname(normalizedFilename).replace(/^\./, '').toLowerCase()
+  if (!extension || !allowedVideoExtensions.includes(extension)) {
+    throw new ImageProcessingError(`不允许上传 .${extension || '无扩展名'} 视频，允许类型：${allowedVideoExtensions.map((item) => item.toUpperCase()).join('、')}`, 400)
+  }
+  const normalizedMime = String(mimetype || '').toLowerCase().split(';', 1)[0]
+  if (normalizedMime && normalizedMime !== 'application/octet-stream' && normalizedMime !== videoMimeTypesByFormat[extension]) {
+    throw new ImageProcessingError(`视频文件类型与 .${extension} 扩展名不匹配`, 400)
+  }
+  return extension
+}
 
 const normalizeUploadFilename = (value) => {
   let name = String(value || 'image').split(/[\\/]/).pop() || 'image'
@@ -522,12 +613,29 @@ const normalizeStorageProviderId = (value, fallback = null) => {
 
 const getUserSummary = (id) => {
   const row = db.prepare(`
-    SELECT users.*, COUNT(images.id) AS image_count, COALESCE(SUM(images.size), 0) AS storage_used
-    FROM users LEFT JOIN images ON images.owner_id = users.id
-    WHERE users.id = ? GROUP BY users.id
+    SELECT users.*,
+      (SELECT COUNT(*) FROM images WHERE images.owner_id = users.id) AS image_count,
+      (SELECT COUNT(*) FROM videos WHERE videos.owner_id = users.id) AS video_count,
+      (
+        COALESCE((SELECT SUM(size) FROM images WHERE images.owner_id = users.id), 0)
+        + COALESCE((SELECT SUM(size) FROM videos WHERE videos.owner_id = users.id), 0)
+      ) AS storage_used
+    FROM users
+    WHERE users.id = ?
   `).get(id)
-  return row ? { ...mapUser(row), imageCount: Number(row.image_count), storageUsed: Number(row.storage_used) } : null
+  return row ? {
+    ...mapUser(row),
+    imageCount: Number(row.image_count),
+    videoCount: Number(row.video_count),
+    storageUsed: Number(row.storage_used),
+  } : null
 }
+
+const getUserStorageUsed = (userId) => Number(db.prepare(`
+  SELECT
+    COALESCE((SELECT SUM(size) FROM images WHERE owner_id = ?), 0)
+    + COALESCE((SELECT SUM(size) FROM videos WHERE owner_id = ?), 0) AS used
+`).get(userId, userId).used)
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadTempDir),
@@ -568,6 +676,19 @@ const guestUpload = multer({
   }
 })
 
+const videoUpload = multer({
+  storage,
+  limits: { fileSize: videoMaxBytes, files: 10 },
+  fileFilter: (_req, file, cb) => {
+    try {
+      validateVideoFilename(normalizeUploadFilename(file.originalname), file.mimetype)
+      cb(null, true)
+    } catch (error) {
+      cb(error)
+    }
+  },
+})
+
 const cleanupPendingFiles = (files) => {
   for (const file of files || []) {
     if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path)
@@ -586,7 +707,7 @@ const persistUploadedFiles = async ({ files, user, album, request, guestUploaded
       processed.push({ file, ...result })
     }
 
-    const used = Number(db.prepare('SELECT COALESCE(SUM(size), 0) AS used FROM images WHERE owner_id = ?').get(user.id).used)
+    const used = getUserStorageUsed(user.id)
     const processedSize = processed.reduce((sum, item) => sum + item.file.size, 0)
     const pendingSize = uploadReservations.get(user.id) || 0
     if (used + pendingSize + processedSize > user.quota) throw new ImageProcessingError('图片处理后的文件超过存储配额，请降低质量或清理空间后重试', 413)
@@ -634,6 +755,76 @@ const persistUploadedFiles = async ({ files, user, album, request, guestUploaded
         }
         insert.run(image)
         created.push(mapImage(db.prepare('SELECT * FROM images WHERE id = ?').get(image.id), request))
+      }
+    })
+    transaction()
+    return created
+  } catch (error) {
+    await Promise.allSettled(stored.map(({ file, location }) => storageManager.deleteStoredObject({
+      owner_id: user.id,
+      filename: file.filename,
+      storage_provider_id: location.providerId,
+      storage_key: location.storageKey,
+    })))
+    cleanupPendingFiles(files)
+    throw error
+  } finally {
+    if (reservedBytes > 0) {
+      const remaining = (uploadReservations.get(user.id) || reservedBytes) - reservedBytes
+      if (remaining > 0) uploadReservations.set(user.id, remaining)
+      else uploadReservations.delete(user.id)
+    }
+  }
+}
+
+const persistUploadedVideos = async ({ files, user, request }) => {
+  const providerId = storageManager.getUploadProviderId(user.storageProviderId)
+  const stored = []
+  let reservedBytes = 0
+  try {
+    for (const file of files) validateVideoFilename(file.originalname, file.mimetype)
+    const used = getUserStorageUsed(user.id)
+    const incoming = files.reduce((sum, file) => sum + file.size, 0)
+    const pendingSize = uploadReservations.get(user.id) || 0
+    if (used + pendingSize + incoming > user.quota) throw new ImageProcessingError('视频文件超过存储配额，请清理空间后重试', 413)
+    reservedBytes = incoming
+    uploadReservations.set(user.id, pendingSize + reservedBytes)
+
+    for (const file of files) {
+      const location = await storageManager.storeFile(user.id, file, providerId)
+      stored.push({ file, location })
+    }
+
+    const insert = db.prepare(`
+      INSERT INTO videos (
+        id, owner_id, name, filename, storage_provider_id, storage_key, url, type, mime_type,
+        size, album, starred, views, created_at
+      ) VALUES (
+        @id, @ownerId, @name, @filename, @storageProviderId, @storageKey, @url, @type, @mimeType,
+        @size, @album, 0, 0, @createdAt
+      )
+    `)
+    const created = []
+    const transaction = db.transaction(() => {
+      for (const { file, location } of stored) {
+        const videoId = crypto.randomUUID()
+        const format = validateVideoFilename(file.originalname, file.mimetype)
+        const video = {
+          id: videoId,
+          ownerId: user.id,
+          name: file.originalname,
+          filename: file.filename,
+          storageProviderId: location.providerId,
+          storageKey: location.storageKey,
+          url: managedVideoPath({ id: videoId, name: file.originalname, filename: file.filename }),
+          type: format,
+          mimeType: videoMimeTypesByFormat[format] || file.mimetype || 'application/octet-stream',
+          size: file.size,
+          album: '视频',
+          createdAt: new Date().toISOString(),
+        }
+        insert.run(video)
+        created.push(mapVideo(db.prepare('SELECT * FROM videos WHERE id = ?').get(video.id), request))
       }
     })
     transaction()
@@ -730,34 +921,38 @@ app.use('/api', (_req, res, next) => {
 })
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'PicNest', database: 'sqlite' }))
 
-const streamManagedImage = async (req, res) => {
-  const image = db.prepare('SELECT * FROM images WHERE id = ?').get(req.params.id)
-  if (!image || !image.storage_provider_id || (!image.storage_key && !image.filename)) {
-    return res.status(404).json({ message: '图片不存在' })
+const streamManagedMedia = async (req, res, { table, filenameFor, missingMessage, failureMessage }) => {
+  const media = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(req.params.id)
+  if (!media || !media.storage_provider_id || (!media.storage_key && !media.filename)) {
+    return res.status(404).json({ message: missingMessage })
   }
 
   try {
-    const object = await storageManager.openStoredObject(image)
+    const object = await storageManager.openStoredObject(media, { rangeHeader: req.headers.range })
     let cleaned = false
     const cleanup = () => {
       if (cleaned) return
       cleaned = true
       object.cleanup?.()
     }
-    const etag = object.etag || `"${image.id}"`
+    const etag = object.etag || `"${media.id}"`
 
-    res.setHeader('Content-Type', object.contentType || image.mime_type || 'application/octet-stream')
-    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(publicImageFilename(image))}`)
+    res.setHeader('Content-Type', object.contentType || media.mime_type || 'application/octet-stream')
+    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(filenameFor(media))}`)
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
-    res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:")
+    res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'")
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
     res.setHeader('ETag', etag)
     res.setHeader('X-Content-Type-Options', 'nosniff')
-    if (Number.isFinite(Number(object.contentLength || image.size))) {
-      res.setHeader('Content-Length', String(object.contentLength || image.size))
+    if (object.acceptRanges) res.setHeader('Accept-Ranges', object.acceptRanges)
+    if (object.contentRange) res.setHeader('Content-Range', object.contentRange)
+    const contentLength = object.contentLength ?? media.size
+    if (Number.isFinite(Number(contentLength))) {
+      res.setHeader('Content-Length', String(contentLength))
     }
-    const lastModified = object.lastModified || image.created_at
+    const lastModified = object.lastModified || media.created_at
     if (lastModified) res.setHeader('Last-Modified', new Date(lastModified).toUTCString())
+    if (object.statusCode) res.status(object.statusCode)
 
     if (req.headers['if-none-match'] === etag) {
       object.body.destroy?.()
@@ -770,7 +965,7 @@ const streamManagedImage = async (req, res) => {
       return res.end()
     }
 
-    db.prepare('UPDATE images SET views = views + 1 WHERE id = ?').run(image.id)
+    db.prepare(`UPDATE ${table} SET views = views + 1 WHERE id = ?`).run(media.id)
 
     res.once('finish', cleanup)
     res.once('close', cleanup)
@@ -782,11 +977,27 @@ const streamManagedImage = async (req, res) => {
     object.body.pipe(res)
   } catch (error) {
     const status = error instanceof StorageManagerError ? error.status : 502
-    if (status >= 500) console.error(`Failed to stream image ${image.id}`, error)
-    res.status(status).json({ message: status === 404 ? '图片原文件不存在' : '图片读取失败' })
+    if (status >= 500) console.error(`Failed to stream ${table.slice(0, -1)} ${media.id}`, error)
+    res.status(status).json({ message: status === 404 ? `${failureMessage}原文件不存在` : `${failureMessage}读取失败` })
   }
 }
 
+const streamManagedImage = (req, res) => streamManagedMedia(req, res, {
+  table: 'images',
+  filenameFor: publicImageFilename,
+  missingMessage: '图片不存在',
+  failureMessage: '图片',
+})
+
+const streamManagedVideo = (req, res) => streamManagedMedia(req, res, {
+  table: 'videos',
+  filenameFor: publicVideoFilename,
+  missingMessage: '视频不存在',
+  failureMessage: '视频',
+})
+
+app.get('/media/video/:id', streamManagedVideo)
+app.get('/media/video/:id/:filename', streamManagedVideo)
 app.get('/media/:id', streamManagedImage)
 app.get('/media/:id/:filename', streamManagedImage)
 
@@ -797,11 +1008,14 @@ app.get('/api/public/config', (_req, res) => {
     maxFileSize: 10 * 1024 * 1024,
     maxFiles: 5,
     allowedExtensions: getImageProcessingSettings().allowedExtensions,
+    videoMaxFileSize: videoMaxBytes,
+    videoMaxFiles: 10,
+    videoExtensions: allowedVideoExtensions,
   })
 })
 
 app.post('/api/public/images', allowGuestUpload, guestUploadLimiter, guestUpload.array('files', 5), async (req, res) => {
-  const used = db.prepare('SELECT COALESCE(SUM(size), 0) AS used FROM images WHERE owner_id = ?').get(req.user.id).used
+  const used = getUserStorageUsed(req.user.id)
   const incoming = (req.files || []).reduce((sum, file) => sum + file.size, 0)
   if (!req.files?.length) return res.status(400).json({ message: '请选择需要上传的图片' })
   if (used + incoming > req.user.quota) {
@@ -909,11 +1123,22 @@ app.delete('/api/storage/providers/:id', authenticate, requireSessionAuth, requi
 
 app.get('/api/users', authenticate, requireSessionAuth, requireAdmin, (_req, res) => {
   const rows = db.prepare(`
-    SELECT users.*, COUNT(images.id) AS image_count, COALESCE(SUM(images.size), 0) AS storage_used
-    FROM users LEFT JOIN images ON images.owner_id = users.id
-    GROUP BY users.id ORDER BY users.created_at ASC
+    SELECT users.*,
+      (SELECT COUNT(*) FROM images WHERE images.owner_id = users.id) AS image_count,
+      (SELECT COUNT(*) FROM videos WHERE videos.owner_id = users.id) AS video_count,
+      (
+        COALESCE((SELECT SUM(size) FROM images WHERE images.owner_id = users.id), 0)
+        + COALESCE((SELECT SUM(size) FROM videos WHERE videos.owner_id = users.id), 0)
+      ) AS storage_used
+    FROM users
+    ORDER BY users.created_at ASC
   `).all()
-  res.json(rows.map((row) => ({ ...mapUser(row), imageCount: Number(row.image_count), storageUsed: Number(row.storage_used) })))
+  res.json(rows.map((row) => ({
+    ...mapUser(row),
+    imageCount: Number(row.image_count),
+    videoCount: Number(row.video_count),
+    storageUsed: Number(row.storage_used),
+  })))
 })
 
 app.post('/api/users', authenticate, requireSessionAuth, requireAdmin, (req, res) => {
@@ -930,7 +1155,7 @@ app.post('/api/users', authenticate, requireSessionAuth, requireAdmin, (req, res
   if (storageProviderId === undefined) return res.status(400).json({ message: '选择的存储策略不存在' })
   if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) return res.status(409).json({ message: '该邮箱已经存在' })
   const user = createUser({ name, email, password, role, quota, storageProviderId })
-  res.status(201).json({ ...user, imageCount: 0, storageUsed: 0 })
+  res.status(201).json({ ...user, imageCount: 0, videoCount: 0, storageUsed: 0 })
 })
 
 app.patch('/api/users/:id', authenticate, requireSessionAuth, requireAdmin, (req, res) => {
@@ -952,7 +1177,7 @@ app.patch('/api/users/:id', authenticate, requireSessionAuth, requireAdmin, (req
   if (password && !validPassword(password)) return res.status(400).json({ message: '新密码需要 8 到 128 个字符' })
   if (db.prepare('SELECT 1 FROM users WHERE email = ? AND id <> ?').get(email, current.id)) return res.status(409).json({ message: '该邮箱已经存在' })
 
-  const used = Number(db.prepare('SELECT COALESCE(SUM(size), 0) AS used FROM images WHERE owner_id = ?').get(current.id).used)
+  const used = getUserStorageUsed(current.id)
   if (quota < used) return res.status(409).json({ message: `存储配额不能低于当前已用空间 ${Math.ceil(used / 1024 ** 2)} MB` })
 
   const passwordHash = password ? bcrypt.hashSync(password, 12) : current.password_hash
@@ -1022,7 +1247,7 @@ app.post('/api/images', authenticate, upload.array('files', 20), async (req, res
     return res.status(400).json({ message: '相册名称需要 1 到 100 个字符' })
   }
   const album = requestedAlbum || ensureDefaultAlbum(req.user.id)
-  const used = db.prepare('SELECT COALESCE(SUM(size), 0) AS used FROM images WHERE owner_id = ?').get(req.user.id).used
+  const used = getUserStorageUsed(req.user.id)
   const incoming = (req.files || []).reduce((sum, file) => sum + file.size, 0)
   if (used + incoming > req.user.quota) {
     cleanupPendingFiles(req.files)
@@ -1036,6 +1261,61 @@ app.post('/api/images', authenticate, upload.array('files', 20), async (req, res
     processingSettings: uploadProcessingSettings(req.body),
   })
   res.status(201).json(created)
+})
+
+app.get('/api/videos', authenticate, (req, res) => {
+  const videos = db.prepare('SELECT * FROM videos WHERE owner_id = ? ORDER BY created_at DESC').all(req.user.id)
+  res.json(videos.map((video) => mapVideo(video, req)))
+})
+
+app.get('/api/videos/:id', authenticate, (req, res) => {
+  const video = db.prepare('SELECT * FROM videos WHERE id = ? AND owner_id = ?').get(req.params.id, req.user.id)
+  if (!video) return res.status(404).json({ message: '视频不存在' })
+  res.json(mapVideo(video, req))
+})
+
+app.post('/api/videos', authenticate, videoUpload.array('files', 10), async (req, res) => {
+  if (!req.files?.length) return res.status(400).json({ message: '请选择需要上传的视频' })
+  const created = await persistUploadedVideos({
+    files: req.files,
+    user: req.user,
+    request: req,
+  })
+  res.status(201).json(created)
+})
+
+app.patch('/api/videos/:id', authenticate, (req, res) => {
+  const video = db.prepare('SELECT * FROM videos WHERE id = ? AND owner_id = ?').get(req.params.id, req.user.id)
+  if (!video) return res.status(404).json({ message: '视频不存在' })
+  const name = Object.hasOwn(req.body, 'name') ? String(req.body.name).trim() : video.name
+  const starred = Object.hasOwn(req.body, 'starred') ? (req.body.starred ? 1 : 0) : video.starred
+  if (!validImageName(name)) return res.status(400).json({ message: '视频名称需要 1 到 255 个字符' })
+  if (Object.hasOwn(req.body, 'starred') && typeof req.body.starred !== 'boolean') return res.status(400).json({ message: 'starred 必须是布尔值' })
+  db.prepare('UPDATE videos SET name = ?, starred = ? WHERE id = ? AND owner_id = ?')
+    .run(name, starred, req.params.id, req.user.id)
+  res.json(mapVideo(db.prepare('SELECT * FROM videos WHERE id = ?').get(req.params.id), req))
+})
+
+const removeOwnedVideo = async (video, userId) => {
+  await storageManager.deleteStoredObject(video)
+  db.prepare('DELETE FROM videos WHERE id = ? AND owner_id = ?').run(video.id, userId)
+}
+
+app.delete('/api/videos/:id', authenticate, async (req, res) => {
+  const video = db.prepare('SELECT * FROM videos WHERE id = ? AND owner_id = ?').get(req.params.id, req.user.id)
+  if (!video) return res.status(404).json({ message: '视频不存在' })
+  await removeOwnedVideo(video, req.user.id)
+  res.status(204).end()
+})
+
+app.post('/api/videos/bulk-delete', authenticate, async (req, res) => {
+  if (!Array.isArray(req.body.ids) || req.body.ids.length === 0) return res.status(400).json({ message: '请选择需要删除的视频' })
+  if (req.body.ids.length > 200) return res.status(400).json({ message: '单次最多删除 200 个视频' })
+  const ids = new Set(req.body.ids.filter((id) => typeof id === 'string' && id.length <= 100))
+  if (!ids.size) return res.status(400).json({ message: '视频 ID 格式无效' })
+  const owned = db.prepare('SELECT * FROM videos WHERE owner_id = ?').all(req.user.id).filter((video) => ids.has(video.id))
+  for (const video of owned) await removeOwnedVideo(video, req.user.id)
+  res.json({ deleted: owned.length })
 })
 
 app.patch('/api/images/:id', authenticate, (req, res) => {
@@ -1155,7 +1435,15 @@ app.delete('/api/api-keys/:id', authenticate, requireSessionAuth, (req, res) => 
 })
 
 app.get('/api/stats', authenticate, (req, res) => {
-  const aggregate = db.prepare('SELECT COUNT(*) AS images, COALESCE(SUM(size), 0) AS used FROM images WHERE owner_id = ?').get(req.user.id)
+  const aggregate = db.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM images WHERE owner_id = ?) AS images,
+      (SELECT COUNT(*) FROM videos WHERE owner_id = ?) AS videos,
+      (
+        COALESCE((SELECT SUM(size) FROM images WHERE owner_id = ?), 0)
+        + COALESCE((SELECT SUM(size) FROM videos WHERE owner_id = ?), 0)
+      ) AS used
+  `).get(req.user.id, req.user.id, req.user.id, req.user.id)
   const month = getCurrentMonth()
   const usage = db.prepare(`
     SELECT calls, success_calls, failed_calls, response_ms_total, traffic_bytes
@@ -1164,6 +1452,7 @@ app.get('/api/stats', authenticate, (req, res) => {
   const calls = Number(usage.calls)
   res.json({
     images: Number(aggregate.images),
+    videos: Number(aggregate.videos),
     used: Number(aggregate.used),
     limit: req.user.quota,
     traffic: Number(usage.traffic_bytes),
@@ -1194,10 +1483,10 @@ app.use((error, req, res, _next) => {
   if (error?.type === 'entity.too.large') return res.status(413).json({ message: '请求内容不能超过 1 MB' })
   if (error instanceof SyntaxError && error?.status === 400 && Object.hasOwn(error, 'body')) return res.status(400).json({ message: 'JSON 请求内容格式错误' })
   if (error instanceof multer.MulterError) {
-    const limit = req.path.startsWith('/api/public/') ? '10MB' : '20MB'
+    const limit = req.path.startsWith('/api/public/') ? '10MB' : req.path.startsWith('/api/videos') ? `${Math.round(videoMaxBytes / 1024 / 1024)}MB` : '20MB'
     const tooLarge = ['LIMIT_FILE_SIZE', 'LIMIT_FILE_COUNT'].includes(error.code)
     const message = error.code === 'LIMIT_FILE_SIZE'
-      ? `单张图片不能超过 ${limit}`
+      ? `${req.path.startsWith('/api/videos') ? '单个视频' : '单张图片'}不能超过 ${limit}`
       : error.code === 'LIMIT_FILE_COUNT'
         ? `单次上传图片数量超过限制`
         : '上传请求格式不正确'

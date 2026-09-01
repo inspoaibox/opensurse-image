@@ -41,13 +41,15 @@ import {
   Upload,
   UserPlus,
   Users,
+  Video,
   X,
 } from 'lucide-react'
-import type { AlbumItem, ApiKeyItem, ImageItem, ImageMetadata, ImageProcessingSettings, Stats, StorageProviderItem, StorageProviderType, User, UserSummary, ViewName } from './types'
+import type { AlbumItem, ApiKeyItem, ImageItem, ImageMetadata, ImageProcessingSettings, Stats, StorageProviderItem, StorageProviderType, User, UserSummary, VideoItem, ViewName } from './types'
 import ApiDocsModal from './ApiDocsModal'
 
 const defaultStats: Stats = {
   images: 0,
+  videos: 0,
   used: 0,
   limit: 10 * 1024 ** 3,
   traffic: 0,
@@ -58,6 +60,8 @@ const defaultStats: Stats = {
 }
 
 const defaultAllowedExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg']
+const defaultVideoExtensions = ['mp4', 'webm', 'mov', 'm4v', 'avi', 'mkv']
+const defaultVideoMaxFileSize = 500 * 1024 * 1024
 const extensionAccept = (extensions: string[]) => extensions.map((extension) => `.${extension}`).join(',')
 const extensionSummary = (extensions: string[]) => extensions.map((extension) => extension.toUpperCase()).join('、')
 const uploadFileMatches = (file: File, extensions: string[]) => {
@@ -75,9 +79,26 @@ const validateUploadSelection = (files: File[], extensions: string[], maxFiles: 
   return ''
 }
 
+const videoExtensionAccept = (extensions: string[]) => extensions.map((extension) => `video/${extension}`).concat(extensions.map((extension) => `.${extension}`)).join(',')
+const videoFileMatches = (file: File, extensions: string[]) => {
+  const extension = file.name.split('.').pop()?.toLowerCase()
+  return Boolean(extension && file.name.includes('.') && extensions.includes(extension))
+}
+
+const validateVideoSelection = (files: File[], extensions: string[], maxFiles: number, maxFileSize: number) => {
+  if (!files.length) return '请选择需要上传的视频'
+  if (files.length > maxFiles) return `单次最多上传 ${maxFiles} 个视频`
+  const invalidType = files.find((file) => !videoFileMatches(file, extensions))
+  if (invalidType) return `${invalidType.name} 的文件类型不在允许列表中`
+  const oversized = files.find((file) => file.size > maxFileSize)
+  if (oversized) return `${oversized.name} 超过 ${Math.round(maxFileSize / 1024 / 1024)} MB 限制`
+  return ''
+}
+
 const viewMeta: Record<ViewName, { title: string; eyebrow: string }> = {
   dashboard: { title: '工作台', eyebrow: '今天也要好好整理灵感' },
   gallery: { title: '图片库', eyebrow: '查找、整理与分享全部素材' },
+  videos: { title: '视频库', eyebrow: '上传、播放与分享你的动态内容' },
   albums: { title: '相册', eyebrow: '让每一组内容都有自己的归属' },
   users: { title: '成员管理', eyebrow: '管理团队成员与空间权限' },
   developer: { title: '开发者', eyebrow: 'API、密钥与自动化工作流' },
@@ -162,6 +183,16 @@ const buildImageReferences = (image: ImageItem) => {
     { key: 'bbcode', label: 'BBCode（论坛）', value: image.links?.bbcode || `[img]${direct}[/img]` },
     { key: 'markdown', label: 'Markdown', value: image.links?.markdown || `![${escapeMarkdownAlt(image.name)}](${direct})` },
     { key: 'html', label: 'HTML', value: image.links?.html || `<img src="${direct}" alt="${escapeHtmlAttribute(image.name)}" />` },
+  ]
+}
+
+const buildVideoReferences = (video: VideoItem) => {
+  const direct = video.links?.direct || absoluteUrl(video.url)
+  return [
+    { key: 'direct', label: '视频直链', value: direct },
+    { key: 'markdown', label: 'Markdown', value: video.links?.markdown || `[${escapeMarkdownAlt(video.name)}](${direct})` },
+    { key: 'bbcode', label: 'BBCode（论坛）', value: video.links?.bbcode || `[video]${direct}[/video]` },
+    { key: 'html', label: 'HTML5 视频', value: video.links?.html || `<video controls preload="metadata" src="${escapeHtmlAttribute(direct)}"></video>` },
   ]
 }
 
@@ -253,6 +284,9 @@ function App() {
   const [guestUploadEnabled, setGuestUploadEnabled] = useState(false)
   const [allowedExtensions, setAllowedExtensions] = useState<string[]>(defaultAllowedExtensions)
   const [images, setImages] = useState<ImageItem[]>([])
+  const [videos, setVideos] = useState<VideoItem[]>([])
+  const [videoExtensions, setVideoExtensions] = useState<string[]>(defaultVideoExtensions)
+  const [videoMaxFileSize, setVideoMaxFileSize] = useState(defaultVideoMaxFileSize)
   const [albums, setAlbums] = useState<AlbumItem[]>([])
   const [selectedUploadAlbum, setSelectedUploadAlbum] = useState('')
   const [galleryAlbum, setGalleryAlbum] = useState('全部相册')
@@ -263,6 +297,7 @@ function App() {
   const [uploadProgress, setUploadProgress] = useState(0)
   const [uploadResults, setUploadResults] = useState<ImageItem[]>([])
   const [shareImage, setShareImage] = useState<ImageItem | null>(null)
+  const [shareVideo, setShareVideo] = useState<VideoItem | null>(null)
   const [toast, setToast] = useState('')
   const toastTimer = useRef<number | null>(null)
 
@@ -280,14 +315,15 @@ function App() {
     setLoading(true)
     setDataError('')
     try {
-      const [imageResponse, statsResponse, albumResponse] = await Promise.all([fetch('/api/images'), fetch('/api/stats'), fetch('/api/albums')])
-      if ([imageResponse, statsResponse, albumResponse].some((response) => response.status === 401)) {
+      const [imageResponse, videoResponse, statsResponse, albumResponse] = await Promise.all([fetch('/api/images'), fetch('/api/videos'), fetch('/api/stats'), fetch('/api/albums')])
+      if ([imageResponse, videoResponse, statsResponse, albumResponse].some((response) => response.status === 401)) {
         setUser(null)
         throw new Error('登录会话已失效，请重新登录')
       }
-      if (!imageResponse.ok || !statsResponse.ok || !albumResponse.ok) throw new Error('空间数据加载失败')
-      const [imageData, statsData, albumData]: [ImageItem[], Stats, AlbumItem[]] = await Promise.all([imageResponse.json(), statsResponse.json(), albumResponse.json()])
+      if (!imageResponse.ok || !videoResponse.ok || !statsResponse.ok || !albumResponse.ok) throw new Error('空间数据加载失败')
+      const [imageData, videoData, statsData, albumData]: [ImageItem[], VideoItem[], Stats, AlbumItem[]] = await Promise.all([imageResponse.json(), videoResponse.json(), statsResponse.json(), albumResponse.json()])
       setImages(imageData)
+      setVideos(videoData)
       setStats({ ...defaultStats, ...statsData })
       setAlbums(albumData)
       setSelectedUploadAlbum((current) => current && albumData.some((album) => album.name === current) ? current : '')
@@ -310,6 +346,12 @@ function App() {
           setGuestUploadEnabled(Boolean(publicConfig.guestUploadEnabled))
           if (Array.isArray(publicConfig.allowedExtensions) && publicConfig.allowedExtensions.length) {
             setAllowedExtensions(publicConfig.allowedExtensions)
+          }
+          if (Array.isArray(publicConfig.videoExtensions) && publicConfig.videoExtensions.length) {
+            setVideoExtensions(publicConfig.videoExtensions)
+          }
+          if (Number.isFinite(publicConfig.videoMaxFileSize) && publicConfig.videoMaxFileSize > 0) {
+            setVideoMaxFileSize(publicConfig.videoMaxFileSize)
           }
         }
         if (!response.ok) {
@@ -341,10 +383,13 @@ function App() {
     await fetch('/api/auth/logout', { method: 'POST' })
     setUser(null)
     setImages([])
+    setVideos([])
     setAlbums([])
     setSelectedUploadAlbum('')
     setGalleryAlbum('全部相册')
     setUploadResults([])
+    setShareImage(null)
+    setShareVideo(null)
     setStats(defaultStats)
     setActiveView('dashboard')
   }
@@ -422,7 +467,81 @@ function App() {
     notify(`${removed.length} 张图片已永久删除`)
   }
 
+  const uploadVideos = async (files: File[]) => {
+    if (!files.length || uploading) return
+    const validationError = validateVideoSelection(files, videoExtensions, 10, videoMaxFileSize)
+    if (validationError) return notify(validationError)
+    setUploading(true)
+    setUploadProgress(10)
+    const ticker = window.setInterval(() => {
+      setUploadProgress((value) => (value < 86 ? value + Math.max(2, Math.round((86 - value) / 6)) : value))
+    }, 180)
+    try {
+      const form = new FormData()
+      files.forEach((file) => form.append('files', file))
+      const response = await fetch('/api/videos', { method: 'POST', body: form })
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({ message: '视频上传失败' }))
+        throw new Error(detail.message)
+      }
+      const created: VideoItem[] = await response.json()
+      setUploadProgress(100)
+      setVideos((current) => [...created, ...current])
+      setStats((current) => ({
+        ...current,
+        videos: current.videos + created.length,
+        used: current.used + created.reduce((sum, item) => sum + item.size, 0),
+      }))
+      notify(`${created.length} 个视频已安全入库`)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '视频上传失败，请重试')
+    } finally {
+      window.clearInterval(ticker)
+      window.setTimeout(() => {
+        setUploading(false)
+        setUploadProgress(0)
+      }, 500)
+    }
+  }
+
+  const patchVideo = async (id: string, changes: Partial<VideoItem>) => {
+    const response = await fetch(`/api/videos/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(changes),
+    })
+    if (!response.ok) return notify('视频更新失败，请重试')
+    const updated: VideoItem = await response.json()
+    setVideos((current) => current.map((item) => (item.id === id ? updated : item)))
+    if (shareVideo?.id === id) setShareVideo(updated)
+  }
+
+  const deleteVideos = async (ids: string[]) => {
+    if (!ids.length) return
+    const removed = videos.filter((item) => ids.includes(item.id))
+    const response = ids.length === 1
+      ? await fetch(`/api/videos/${ids[0]}`, { method: 'DELETE' })
+      : await fetch('/api/videos/bulk-delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids }),
+        })
+    if (!response.ok) return notify('视频删除失败，请重试')
+    setVideos((current) => current.filter((item) => !ids.includes(item.id)))
+    setStats((current) => ({
+      ...current,
+      videos: Math.max(0, current.videos - removed.length),
+      used: Math.max(0, current.used - removed.reduce((sum, item) => sum + item.size, 0)),
+    }))
+    setShareVideo(null)
+    notify(`${removed.length} 个视频已永久删除`)
+  }
+
   const jumpToUpload = () => {
+    if (activeView === 'videos') {
+      window.setTimeout(() => document.getElementById('video-file-picker')?.click(), 0)
+      return
+    }
     setActiveView('dashboard')
     window.setTimeout(() => document.getElementById('file-picker')?.click(), 0)
   }
@@ -459,6 +578,8 @@ function App() {
     switch (activeView) {
       case 'gallery':
         return <GalleryView images={images} albums={albums} selectedAlbum={galleryAlbum} onAlbumChange={setGalleryAlbum} loading={loading} onShare={setShareImage} onPatch={patchImage} onDelete={deleteImages} />
+      case 'videos':
+        return <VideoLibrary videos={videos} extensions={videoExtensions} maxFileSize={videoMaxFileSize} uploading={uploading} progress={uploadProgress} onUpload={uploadVideos} onShare={setShareVideo} onPatch={patchVideo} onDelete={deleteVideos} notify={notify} />
       case 'albums':
         return <AlbumsView albums={albums} images={images} onOpenGallery={openAlbum} onAlbumCreated={addAlbum} onSetDefault={setDefaultAlbum} notify={notify} />
       case 'users':
@@ -504,6 +625,17 @@ function App() {
           onPatch={patchImage}
           onDelete={() => {
             if (window.confirm(`确认永久删除“${shareImage.name}”吗？此操作无法撤销。`)) void deleteImages([shareImage.id])
+          }}
+          notify={notify}
+        />
+      )}
+      {shareVideo && (
+        <VideoShareModal
+          video={shareVideo}
+          onClose={() => setShareVideo(null)}
+          onPatch={patchVideo}
+          onDelete={() => {
+            if (window.confirm(`确认永久删除“${shareVideo.name}”吗？此操作无法撤销。`)) void deleteVideos([shareVideo.id])
           }}
           notify={notify}
         />
@@ -671,6 +803,7 @@ function Sidebar({ activeView, onChange, stats, user, onLogout }: { activeView: 
   const primary: NavItem[] = [
     { id: 'dashboard' as const, label: '工作台', icon: LayoutDashboard },
     { id: 'gallery' as const, label: '图片库', icon: Images, count: stats.images },
+    { id: 'videos' as const, label: '视频库', icon: Video, count: stats.videos },
     { id: 'albums' as const, label: '相册', icon: Album },
   ]
   const secondary: NavItem[] = [
@@ -724,7 +857,7 @@ function Header({ activeView, onUpload }: { activeView: ViewName; onUpload: () =
         <h1>{viewMeta[activeView].title}</h1>
       </div>
       <div className="header-actions">
-        <button className="button button-primary" onClick={onUpload}><Upload size={17} /> 上传图片</button>
+        <button className="button button-primary" onClick={onUpload}><Upload size={17} /> {activeView === 'videos' ? '上传视频' : '上传图片'}</button>
       </div>
     </header>
   )
@@ -945,6 +1078,91 @@ function GalleryView({ images, albums, selectedAlbum, onAlbumChange, loading, on
   )
 }
 
+function VideoLibrary({ videos, extensions, maxFileSize, uploading, progress, onUpload, onShare, onPatch, onDelete, notify }: {
+  videos: VideoItem[]
+  extensions: string[]
+  maxFileSize: number
+  uploading: boolean
+  progress: number
+  onUpload: (files: File[]) => void
+  onShare: (video: VideoItem) => void
+  onPatch: (id: string, changes: Partial<VideoItem>) => void
+  onDelete: (ids: string[]) => void
+  notify: (message: string) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [type, setType] = useState('全部格式')
+  const [selected, setSelected] = useState<string[]>([])
+  const [dragging, setDragging] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const typeOptions = useMemo(() => ['全部格式', ...Array.from(new Set(videos.map((video) => video.type))).sort()], [videos])
+  const filtered = videos.filter((video) => {
+    const matchQuery = video.name.toLowerCase().includes(query.toLowerCase())
+    const matchType = type === '全部格式' || video.type === type
+    return matchQuery && matchType
+  })
+
+  const receive = (fileList: FileList | File[]) => {
+    const files = Array.from(fileList)
+    const validationError = validateVideoSelection(files, extensions, 10, maxFileSize)
+    if (validationError) return notify(validationError)
+    onUpload(files)
+  }
+
+  const toggleSelect = (id: string) => setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
+
+  return (
+    <div className="video-library-page">
+      <section className={`video-upload-panel section-card ${dragging ? 'dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); receive(event.dataTransfer.files) }}>
+        <input id="video-file-picker" ref={inputRef} type="file" accept={videoExtensionAccept(extensions)} multiple hidden onChange={(event) => { receive(event.target.files || []); event.currentTarget.value = '' }} />
+        <span className="video-upload-icon"><Video size={25} /></span>
+        <div><h2>{uploading ? '视频正在上传…' : '把视频拖到这里'}</h2><p>{uploading ? '大文件上传期间请不要关闭页面' : `支持 ${extensionSummary(extensions)}，单个最大 ${Math.round(maxFileSize / 1024 / 1024)}MB，单次最多 10 个`}</p></div>
+        {uploading ? (
+          <div className="video-upload-progress"><div><i style={{ width: `${progress}%` }} /></div><b>{progress}%</b></div>
+        ) : (
+          <button className="button button-primary" onClick={() => inputRef.current?.click()}><Upload size={16} /> 选择视频</button>
+        )}
+      </section>
+
+      <section className="video-toolbar section-card">
+        <label className="gallery-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="按视频名称搜索" /></label>
+        <select value={type} onChange={(event) => setType(event.target.value)} aria-label="筛选视频格式">{typeOptions.map((name) => <option key={name}>{name}</option>)}</select>
+      </section>
+
+      <div className="gallery-summary">
+        <div><h3>{filtered.length} 个视频</h3><p>{query || type !== '全部格式' ? '当前筛选结果' : '你的全部视频资产'}</p></div>
+        {selected.length > 0 && (
+          <div className="bulk-actions"><span>已选择 {selected.length} 项</span><button onClick={() => { if (window.confirm(`确认永久删除选中的 ${selected.length} 个视频吗？此操作无法撤销。`)) { void onDelete(selected); setSelected([]) } }}><Trash2 size={15} /> 删除</button><button onClick={() => setSelected([])}><X size={15} /> 取消</button></div>
+        )}
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="empty-state"><span><Video size={28} /></span><h3>{videos.length ? '没有找到视频' : '视频库还是空的'}</h3><p>{videos.length ? '试试调整关键词或格式筛选。' : '选择视频或拖曳文件到上方上传区，开始建立视频库。'}</p></div>
+      ) : (
+        <div className="video-grid">
+          {filtered.map((video) => (
+            <article className={`video-card ${selected.includes(video.id) ? 'selected' : ''}`} key={video.id}>
+              <div className="video-preview">
+                <button className="video-open-button" onClick={() => onShare(video)} aria-label={`播放视频 ${video.name}`} title="播放视频">
+                  <video src={video.url} preload="metadata" muted playsInline />
+                  <span className="video-play-indicator"><Video size={19} fill="currentColor" /></span>
+                </button>
+                <span className="format-badge">{video.type}</span>
+                <button className={`select-box card-select ${selected.includes(video.id) ? 'selected' : ''}`} onClick={() => toggleSelect(video.id)} aria-label={`选择${video.name}`}>{selected.includes(video.id) && <Check size={13} />}</button>
+                <div className="card-hover-actions">
+                  <button onClick={() => void onPatch(video.id, { starred: !video.starred })} aria-label="收藏"><Heart size={16} fill={video.starred ? 'currentColor' : 'none'} /></button>
+                  <button onClick={() => onShare(video)} aria-label="分享"><Share2 size={16} /></button>
+                </div>
+              </div>
+              <div className="image-card-meta"><b title={video.name}>{video.name}</b><span>{formatBytes(video.size)} · {formatDate(video.createdAt)}</span></div>
+            </article>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ImageCard({ image, onShare, onPatch, compact = false, selected = false, onSelect }: {
   image: ImageItem
   onShare: (image: ImageItem) => void
@@ -970,6 +1188,83 @@ function ImageCard({ image, onShare, onPatch, compact = false, selected = false,
         <span>{formatBytes(image.size)} · {formatDate(image.createdAt)}</span>
       </div>
     </article>
+  )
+}
+
+function VideoReferenceFields({ video, notify }: { video: VideoItem; notify: (message: string) => void }) {
+  const [copiedKey, setCopiedKey] = useState('')
+  const clearTimer = useRef<number | null>(null)
+  const references = buildVideoReferences(video)
+
+  useEffect(() => () => {
+    if (clearTimer.current !== null) window.clearTimeout(clearTimer.current)
+  }, [])
+
+  const copy = async (key: string, label: string, value: string) => {
+    try {
+      await copyText(value)
+      setCopiedKey(key)
+      notify(`${label}已复制`)
+      if (clearTimer.current !== null) window.clearTimeout(clearTimer.current)
+      clearTimer.current = window.setTimeout(() => setCopiedKey(''), 1800)
+    } catch {
+      notify('复制失败，请手动选择内容')
+    }
+  }
+
+  return <>{references.map(({ key, label, value }) => (
+    <label key={key}>
+      <span>{label}</span>
+      <div><input readOnly value={value} aria-label={label} /><button type="button" onClick={() => void copy(key, label, value)} aria-label={`复制${label}`} title={`复制${label}`}>{copiedKey === key ? <Check size={16} /> : <Copy size={16} />}</button></div>
+    </label>
+  ))}</>
+}
+
+function VideoShareModal({ video, onClose, onPatch, onDelete, notify }: {
+  video: VideoItem
+  onClose: () => void
+  onPatch: (id: string, changes: Partial<VideoItem>) => void
+  onDelete: () => void
+  notify: (message: string) => void
+}) {
+  const direct = absoluteUrl(video.url)
+  const copy = async () => {
+    try {
+      await copyText(direct)
+      notify('视频直链已复制到剪贴板')
+    } catch {
+      notify('复制失败，请手动选择链接')
+    }
+  }
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [onClose])
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <div className="share-modal video-share-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="modal-close" onClick={onClose} aria-label="关闭视频查看"><X size={18} /></button>
+        <div className="share-preview">
+          <a className="share-open-original" href={video.url} target="_blank" rel="noreferrer" aria-label="在新窗口打开视频" title="在新窗口打开视频"><Maximize2 size={18} /></a>
+          <video controls preload="metadata" src={video.url} />
+          <span>{video.type}</span>
+        </div>
+        <div className="share-body">
+          <div className="share-heading"><span><small>视频库</small><h3>{video.name}</h3><p>{video.type} · {formatBytes(video.size)} · {formatDate(video.createdAt)}</p></span><button className={video.starred ? 'starred' : ''} onClick={() => void onPatch(video.id, { starred: !video.starred })} aria-label={video.starred ? '取消收藏' : '收藏视频'}><Star size={18} fill={video.starred ? 'currentColor' : 'none'} /></button></div>
+          <div className="video-share-note"><Video size={15} /> 支持浏览器在线播放，分享直链后可用于网页、论坛或第三方播放器。</div>
+          <div className="link-list"><VideoReferenceFields video={video} notify={notify} /></div>
+          <div className="share-footer"><button className="danger-button" onClick={onDelete}><Trash2 size={16} /> 删除视频</button><a className="button button-secondary" href={video.url} download><Download size={16} /> 下载视频</a><button className="button button-primary" onClick={() => void copy()}><Link2 size={16} /> 复制直链</button></div>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -1142,16 +1437,16 @@ function UsersView({ currentUser, notify, onUserUpdated }: { currentUser: User; 
     <div className="users-page">
       <section className="team-overview">
         <div><span className="eyebrow-pill light"><Users size={13} /> 团队空间</span><h2>一起创作，各自安全。</h2><p>每位成员拥有独立图库、相册、配额、存储策略和 API 密钥。</p></div>
-        <div className="team-stats"><span><b>{users.length}</b><small>空间成员</small></span><span><b>{users.reduce((sum, user) => sum + user.imageCount, 0)}</b><small>团队图片</small></span><span><b>{formatBytes(teamStorage)}</b><small>占用空间</small></span></div>
+        <div className="team-stats"><span><b>{users.length}</b><small>空间成员</small></span><span><b>{users.reduce((sum, user) => sum + user.imageCount + user.videoCount, 0)}</b><small>团队媒体</small></span><span><b>{formatBytes(teamStorage)}</b><small>占用空间</small></span></div>
       </section>
       <section className="section-card users-card">
         <div className="section-heading"><div><h3>空间成员</h3><p>管理账户资料、角色、存储配额与存储策略</p></div><button className="button button-primary" onClick={openCreateUser}><UserPlus size={16} /> 添加成员</button></div>
-        <div className="users-table-head"><span>成员</span><span>角色</span><span>图片</span><span>已用 / 配额</span><span>存储策略</span><span>加入时间</span><span /></div>
+        <div className="users-table-head"><span>成员</span><span>角色</span><span>媒体</span><span>已用 / 配额</span><span>存储策略</span><span>加入时间</span><span /></div>
         {loadingUsers ? <div className="users-loading">正在载入成员…</div> : users.map((user) => (
           <div className="user-row" key={user.id}>
             <span className="member-cell"><i>{user.name.slice(0, 1).toUpperCase()}</i><span><b>{user.name}{user.id === currentUser.id && <em>你</em>}</b><small>{user.email}</small></span></span>
             <span><span className={`role-badge ${user.role}`}>{user.role === 'admin' ? '管理员' : '成员'}</span></span>
-            <span>{user.imageCount} 张</span><span>{formatBytes(user.storageUsed)} / {formatBytes(user.quota)}</span><span className="user-storage-policy">{storageName(user.storageProviderId)}</span><span>{formatDate(user.createdAt)}</span>
+            <span>{user.imageCount} 图 · {user.videoCount} 视频</span><span>{formatBytes(user.storageUsed)} / {formatBytes(user.quota)}</span><span className="user-storage-policy">{storageName(user.storageProviderId)}</span><span>{formatDate(user.createdAt)}</span>
             <button className="icon-button user-edit-button" onClick={() => openEditUser(user)} aria-label={`编辑${user.name}`} title="编辑成员"><Pencil size={16} /></button>
           </div>
         ))}
@@ -1487,7 +1782,7 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
       {storageLoading ? <div className="users-loading">正在载入存储服务…</div> : <div className="storage-provider-list">
         {storageProviders.map((provider) => <div className={`storage-provider ${provider.isDefault ? 'active' : ''}`} key={provider.id}>
           <span>{provider.type === 'local' ? <Server size={22} /> : <Cloud size={22} />}</span>
-          <div className="storage-provider-copy"><b>{provider.name}<em>{storageTypeLabels[provider.type]}</em></b><small>{storageProviderSummary(provider)}</small><small>{provider.imageCount} 张图片保存在此存储</small></div>
+          <div className="storage-provider-copy"><b>{provider.name}<em>{storageTypeLabels[provider.type]}</em></b><small>{storageProviderSummary(provider)}</small><small>{provider.imageCount} 张图片 · {provider.videoCount} 个视频保存在此存储</small></div>
           {provider.isDefault && <span className="storage-current"><CheckCircle2 size={14} /> 当前使用</span>}
           {user.role === 'admin' && <div className="storage-provider-actions">
             <button className="button button-ghost" onClick={() => void testStorageProvider(provider)}><CheckCircle2 size={15} /> 检测</button>

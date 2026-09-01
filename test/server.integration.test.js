@@ -184,6 +184,85 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   const crossOwnerRead = await requestJson(`${baseUrl}/api/images/${image.id}`, { headers: { Cookie: adminCookie } })
   assert.equal(crossOwnerRead.response.status, 404)
 
+  const statsBeforeVideo = await requestJson(`${baseUrl}/api/stats`, { headers: { Cookie: memberCookie } })
+  assert.equal(statsBeforeVideo.response.status, 200)
+  assert.equal(statsBeforeVideo.body.images, 1)
+  assert.equal(statsBeforeVideo.body.videos, 0)
+
+  const videoBytes = Buffer.from('PICNEST VIDEO RANGE TEST CONTENT')
+  const videoForm = new FormData()
+  videoForm.append('files', new Blob([videoBytes], { type: 'video/mp4' }), '演示视频.mp4')
+  const videoUpload = await requestJson(`${baseUrl}/api/videos`, { method: 'POST', headers: { Cookie: memberCookie }, body: videoForm })
+  assert.equal(videoUpload.response.status, 201)
+  assert.equal(videoUpload.body.length, 1)
+  const video = videoUpload.body[0]
+  assert.equal(video.name, '演示视频.mp4')
+  assert.equal(video.filename, '演示视频.mp4')
+  assert.equal(video.type, 'MP4')
+  assert.equal(video.format, 'mp4')
+  assert.equal(video.extension, '.mp4')
+  assert.equal(video.mimeType, 'video/mp4')
+  assert.equal(video.size, videoBytes.length)
+  assert.match(video.url, /\/media\/video\/[^/]+\/.+\.mp4$/)
+  assert.equal(video.links.html.includes('<video controls'), true)
+
+  const videoList = await requestJson(`${baseUrl}/api/videos`, { headers: { Cookie: memberCookie } })
+  assert.equal(videoList.response.status, 200)
+  assert.equal(videoList.body.length, 1)
+  assert.equal(videoList.body[0].id, video.id)
+
+  const videoDetail = await requestJson(`${baseUrl}/api/videos/${video.id}`, { headers: { Cookie: memberCookie } })
+  assert.equal(videoDetail.response.status, 200)
+  assert.equal(videoDetail.body.id, video.id)
+
+  const adminVideoList = await requestJson(`${baseUrl}/api/videos`, { headers: { Cookie: adminCookie } })
+  assert.equal(adminVideoList.response.status, 200)
+  assert.deepEqual(adminVideoList.body, [])
+  const crossOwnerVideoRead = await requestJson(`${baseUrl}/api/videos/${video.id}`, { headers: { Cookie: adminCookie } })
+  assert.equal(crossOwnerVideoRead.response.status, 404)
+
+  const videoMedia = await fetch(video.url)
+  assert.equal(videoMedia.status, 200)
+  assert.equal(videoMedia.headers.get('content-type'), 'video/mp4')
+  assert.equal(videoMedia.headers.get('accept-ranges'), 'bytes')
+  assert.equal(videoMedia.headers.get('content-length'), String(videoBytes.length))
+  assert.deepEqual(Buffer.from(await videoMedia.arrayBuffer()), videoBytes)
+
+  const videoRange = await fetch(video.url, { headers: { Range: 'bytes=1-4' } })
+  assert.equal(videoRange.status, 206)
+  assert.equal(videoRange.headers.get('content-range'), `bytes 1-4/${videoBytes.length}`)
+  assert.equal(videoRange.headers.get('content-length'), '4')
+  assert.deepEqual(Buffer.from(await videoRange.arrayBuffer()), videoBytes.subarray(1, 5))
+
+  const invalidVideoForm = new FormData()
+  invalidVideoForm.append('files', new Blob([videoBytes], { type: 'video/mp4' }), 'not-a-video.txt')
+  const invalidVideoUpload = await requestJson(`${baseUrl}/api/videos`, { method: 'POST', headers: { Cookie: memberCookie }, body: invalidVideoForm })
+  assert.equal(invalidVideoUpload.response.status, 400)
+
+  const renamedVideo = await requestJson(`${baseUrl}/api/videos/${video.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: memberCookie },
+    body: JSON.stringify({ name: '改名.webm', starred: true }),
+  })
+  assert.equal(renamedVideo.response.status, 200)
+  assert.equal(renamedVideo.body.filename, '改名.mp4')
+  assert.match(renamedVideo.body.url, /\.mp4$/)
+  assert.equal(renamedVideo.body.starred, true)
+
+  const statsAfterVideo = await requestJson(`${baseUrl}/api/stats`, { headers: { Cookie: memberCookie } })
+  assert.equal(statsAfterVideo.response.status, 200)
+  assert.equal(statsAfterVideo.body.images, 1)
+  assert.equal(statsAfterVideo.body.videos, 1)
+  assert.equal(statsAfterVideo.body.used, statsBeforeVideo.body.used + videoBytes.length)
+
+  const videoDeletion = await fetch(`${baseUrl}/api/videos/${video.id}`, { method: 'DELETE', headers: { Cookie: memberCookie } })
+  assert.equal(videoDeletion.status, 204)
+  const deletedVideoMedia = await fetch(video.url)
+  assert.equal(deletedVideoMedia.status, 404)
+  const statsAfterVideoDeletion = await requestJson(`${baseUrl}/api/stats`, { headers: { Cookie: memberCookie } })
+  assert.equal(statsAfterVideoDeletion.body.videos, 0)
+  assert.equal(statsAfterVideoDeletion.body.used, statsBeforeVideo.body.used)
+
   const apiKey = await requestJson(`${baseUrl}/api/api-keys`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Cookie: memberCookie },

@@ -28,6 +28,17 @@ const endpointGroups = [
     ],
   },
   {
+    title: '视频接口',
+    rows: [
+      ['GET', '/api/videos', '列出当前用户的全部视频'],
+      ['POST', '/api/videos', '上传 1–10 个视频，multipart/form-data'],
+      ['GET', '/api/videos/:id', '获取当前用户的单个视频详情'],
+      ['PATCH', '/api/videos/:id', '修改视频名称或收藏状态'],
+      ['DELETE', '/api/videos/:id', '删除视频记录与原文件'],
+      ['POST', '/api/videos/bulk-delete', '按 ID 数组批量删除视频'],
+    ],
+  },
+  {
     title: '相册与统计',
     rows: [
       ['GET', '/api/albums', '列出当前用户相册'],
@@ -41,6 +52,13 @@ const endpointGroups = [
     rows: [
       ['GET', '/media/:id/:filename.ext', '公开读取原图，返回正确 Content-Type'],
       ['GET', '/media/:id', '兼容旧版无文件名图片地址'],
+    ],
+  },
+  {
+    title: '视频访问',
+    rows: [
+      ['GET', '/media/video/:id/:filename.ext', '公开读取视频，支持 Range 断点播放'],
+      ['GET', '/media/video/:id', '兼容无文件名视频地址'],
     ],
   },
   {
@@ -113,6 +131,31 @@ const imageProcessingSettingsExample = `{
   "allowedExtensions": ["jpg", "jpeg", "png", "gif", "webp", "svg"]
 }`
 
+const videoResponseExample = `[
+  {
+    "id": "1af72c3a-8a75-4df5-b7ad-1f7cc7be4b4b",
+    "name": "演示视频.mp4",
+    "filename": "演示视频.mp4",
+    "url": "https://img.example.com/media/video/1af72c3a-8a75-4df5-b7ad-1f7cc7be4b4b/演示视频.mp4",
+    "path": "/media/video/1af72c3a-8a75-4df5-b7ad-1f7cc7be4b4b/演示视频.mp4",
+    "type": "MP4",
+    "format": "mp4",
+    "extension": ".mp4",
+    "mimeType": "video/mp4",
+    "size": 5242880,
+    "album": "视频",
+    "starred": false,
+    "views": 0,
+    "links": {
+      "direct": "https://img.example.com/media/video/1af72c3a-8a75-4df5-b7ad-1f7cc7be4b4b/演示视频.mp4",
+      "markdown": "[演示视频.mp4](https://img.example.com/media/video/1af72c3a-8a75-4df5-b7ad-1f7cc7be4b4b/演示视频.mp4)",
+      "bbcode": "[video]https://img.example.com/media/video/1af72c3a-8a75-4df5-b7ad-1f7cc7be4b4b/演示视频.mp4[/video]",
+      "html": "<video controls preload=\"metadata\" src=\"https://img.example.com/media/video/1af72c3a-8a75-4df5-b7ad-1f7cc7be4b4b/演示视频.mp4\"></video>"
+    },
+    "createdAt": "2026-07-14T08:30:00.000Z"
+  }
+]`
+
 const errorResponseExample = `{
   "message": "不允许上传 .heic 文件，允许类型：JPG、JPEG、PNG、GIF、WEBP、SVG"
 }`
@@ -126,6 +169,16 @@ const imageFields = [
   ['links', '直链、Markdown、BBCode、HTML 完整引用'],
   ['width / height', '从处理后图片读取的真实像素尺寸'],
   ['filename', '原文件主体名称与实际输出扩展名组成的公开文件名'],
+]
+
+const videoFields = [
+  ['url', '带域名和真实后缀的完整视频直链'],
+  ['path', '站内相对路径，适合自行拼接域名'],
+  ['format / extension', '标准格式名和实际文件后缀'],
+  ['mimeType', '标准 MIME 类型，例如 video/mp4'],
+  ['links', '直链、Markdown、BBCode、HTML5 video 完整引用'],
+  ['filename', '视频公开文件名；重命名后仍会保持真实视频格式扩展名'],
+  ['views', '通过 PicNest 媒体地址播放或读取时累计的访问次数'],
 ]
 
 const errorStatuses = [
@@ -150,6 +203,11 @@ const uploadCurlExample = (baseUrl: string) => `curl -X POST "${baseUrl}/api/ima
   -F "quality=82" \\
   -F "stripMetadata=true"`
 
+const videoUploadCurlExample = (baseUrl: string) => `curl -X POST "${baseUrl}/api/videos" \\
+  -H "Authorization: Bearer pn_live_xxx" \\
+  -F "files=@demo.mp4" \\
+  -F "files=@screen-recording.webm"`
+
 const markdownCodeBlock = (language: string, content: string) => `\`\`\`${language}\n${content}\n\`\`\``
 const markdownTableCell = (value: string) => value.replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
 
@@ -170,7 +228,7 @@ const buildMarkdownDocs = (baseUrl: string) => {
     '',
     `> API 基础地址：\`${baseUrl}\``,
     '',
-    '接口返回 JSON，图片内容通过带真实后缀的 PicNest 媒体地址访问。生产部署建议设置 `PICNEST_PUBLIC_URL`，确保反向代理、脚本和返回图片地址使用一致的公网域名。',
+    '接口返回 JSON，图片和视频内容通过带真实后缀的 PicNest 媒体地址访问。生产部署建议设置 `PICNEST_PUBLIC_URL`，确保反向代理、脚本和返回媒体地址使用一致的公网域名。',
     '',
     '## 基本约定',
     '',
@@ -181,7 +239,7 @@ const buildMarkdownDocs = (baseUrl: string) => {
     '',
     '## 身份认证',
     '',
-    '自动化客户端在请求头中携带 Bearer 密钥。每把密钥只会访问其所属用户的图片、相册、配额和统计数据。',
+    '自动化客户端在请求头中携带 Bearer 密钥。每把密钥只会访问其所属用户的图片、视频、相册、配额和统计数据。',
     '',
     markdownCodeBlock('http', 'Authorization: Bearer $PICNEST_TOKEN'),
     '',
@@ -203,6 +261,14 @@ const buildMarkdownDocs = (baseUrl: string) => {
     '',
     '上传接口始终返回数组，即使只上传一张。服务端会核对文件扩展名与二进制内容的真实格式、执行转换，并返回文件后缀、MIME 类型、处理结果和四种引用代码。游客上传不接受单次处理参数，始终使用系统默认策略和同一份白名单。',
     '',
+    '## 上传视频',
+    '',
+    '`POST /api/videos` 单次最多上传 10 个视频，单个大小上限由服务端环境变量 `PICNEST_VIDEO_MAX_MB` 控制，默认 500 MB。重复提交 `files` 字段即可批量上传；支持 `mp4`、`webm`、`mov`、`m4v`、`avi`、`mkv`。',
+    '',
+    markdownCodeBlock('bash', videoUploadCurlExample(baseUrl)),
+    '',
+    '视频不会经过图片处理引擎，服务端会校验扩展名与请求 MIME 类型，并按原始字节保存。返回对象包含可公开访问的直链、Markdown、BBCode 和 HTML5 video 引用。视频媒体地址支持 `Range` 请求，浏览器可以按需加载、拖动进度和断点播放。',
+    '',
     '## 图片对象完整响应',
     '',
     '`POST /api/images` 和 `GET /api/images` 返回图片对象数组；`GET /api/images/:id`、修改接口和游客上传中的单个元素使用同一字段结构。成功上传的 HTTP 状态为 `201`。',
@@ -216,6 +282,20 @@ const buildMarkdownDocs = (baseUrl: string) => {
     ...fieldRows,
     '',
     '服务端根据图片二进制内容识别格式。文件名扩展名与实际格式不一致或内容无法识别时返回 `400`；媒体响应发送正确的 `Content-Type`、内联文件名、缓存头和 ETag。',
+    '',
+    '## 视频对象完整响应',
+    '',
+    '`POST /api/videos` 和 `GET /api/videos` 返回视频对象数组；`GET /api/videos/:id` 与修改接口返回单个视频对象。成功上传的 HTTP 状态为 `201`。',
+    '',
+    markdownCodeBlock('json', videoResponseExample),
+    '',
+    '### 字段说明',
+    '',
+    '| 字段 | 说明 |',
+    '| --- | --- |',
+    ...videoFields.map(([field, description]) => `| \`${field}\` | ${description} |`),
+    '',
+    '视频公开地址不要求登录，删除和列表接口仍只允许所有者或其 Bearer 密钥访问。媒体响应支持 `Accept-Ranges: bytes`；请求 `Range: bytes=0-1048575` 时返回 `206 Partial Content`。',
     '',
     '## 全部接口',
     '',
@@ -283,7 +363,7 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
 
   return <div className="modal-backdrop api-doc-backdrop" onMouseDown={onClose}>
     <div className="api-doc-modal" role="dialog" aria-modal="true" aria-labelledby="api-doc-title" onMouseDown={(event) => event.stopPropagation()}>
-      <header><span><small>PicNest Developer</small><h2>API 文档</h2><p>接口返回 JSON，图片内容通过带真实后缀的 PicNest 媒体地址访问。</p></span><div className="api-doc-header-actions"><button type="button" className="api-doc-copy-all" onClick={() => void copyAllMarkdown()} aria-live="polite" aria-label="复制全部 API 文档为 Markdown" title="复制全部 API 文档为 Markdown">{allCopyState === 'copied' ? <Check size={16} /> : <Copy size={16} />}<span>{allCopyState === 'copied' ? '已复制全部内容' : allCopyState === 'failed' ? '复制失败' : '复制全部 Markdown'}</span></button><button type="button" className="api-doc-close" onClick={onClose} aria-label="关闭 API 文档"><X size={19} /></button></div></header>
+      <header><span><small>PicNest Developer</small><h2>API 文档</h2><p>接口返回 JSON，图片和视频内容通过带真实后缀的 PicNest 媒体地址访问。</p></span><div className="api-doc-header-actions"><button type="button" className="api-doc-copy-all" onClick={() => void copyAllMarkdown()} aria-live="polite" aria-label="复制全部 API 文档为 Markdown" title="复制全部 API 文档为 Markdown">{allCopyState === 'copied' ? <Check size={16} /> : <Copy size={15} />}<span>{allCopyState === 'copied' ? '已复制全部内容' : allCopyState === 'failed' ? '复制失败' : '复制全部 Markdown'}</span></button><button type="button" className="api-doc-close" onClick={onClose} aria-label="关闭 API 文档"><X size={19} /></button></div></header>
       <div className="api-doc-layout">
         <aside>
           <b>文档目录</b>
@@ -291,6 +371,8 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
           <a href="#api-doc-auth">身份认证</a>
           <a href="#api-doc-upload">上传图片</a>
           <a href="#api-doc-response">图片对象</a>
+          <a href="#api-doc-video-upload">上传视频</a>
+          <a href="#api-doc-video-response">视频对象</a>
           <a href="#api-doc-endpoints">全部接口</a>
           <a href="#api-doc-errors">错误与限制</a>
         </aside>
@@ -303,7 +385,7 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
 
           <section id="api-doc-auth">
             <h3>身份认证</h3>
-            <p>自动化客户端在请求头中携带 Bearer 密钥。每把密钥只会访问其所属用户的图片、相册、配额和统计数据。</p>
+            <p>自动化客户端在请求头中携带 Bearer 密钥。每把密钥只会访问其所属用户的图片、视频、相册、配额和统计数据。</p>
             <ApiCode>{`Authorization: Bearer $PICNEST_TOKEN`}</ApiCode>
             <p>密钥的创建、查看与删除只能通过网页登录会话执行，不能使用 Bearer 密钥管理其他密钥。</p>
           </section>
@@ -325,6 +407,21 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
             <ApiCode>{imageResponseExample}</ApiCode>
             <div className="api-doc-field-table">{imageFields.map(([field, description]) => <span key={field}><b>{field}</b><small>{description}</small></span>)}</div>
             <p className="api-doc-note">服务端根据图片二进制内容识别格式。文件名扩展名与实际格式不一致或内容无法识别时返回 <code>400</code>；媒体响应发送正确的 <code>Content-Type</code>、内联文件名、缓存头和 ETag。</p>
+          </section>
+
+          <section id="api-doc-video-upload">
+            <h3>上传视频</h3>
+            <p><code>POST /api/videos</code> 单次最多上传 10 个视频，单个大小上限由服务端环境变量 <code>PICNEST_VIDEO_MAX_MB</code> 控制，默认 500 MB。支持 <code>mp4</code>、<code>webm</code>、<code>mov</code>、<code>m4v</code>、<code>avi</code>、<code>mkv</code>。</p>
+            <ApiCode>{videoUploadCurlExample(baseUrl)}</ApiCode>
+            <p>视频不会经过图片处理引擎，服务端会校验扩展名与请求 MIME 类型，并按原始字节保存。返回对象包含直链、Markdown、BBCode 和 HTML5 video 引用；视频媒体地址支持 <code>Range</code> 请求，适合浏览器按需加载和拖动进度。</p>
+          </section>
+
+          <section id="api-doc-video-response">
+            <h3>视频对象完整响应</h3>
+            <p><code>POST /api/videos</code> 和 <code>GET /api/videos</code> 返回视频对象数组；<code>GET /api/videos/:id</code> 与修改接口返回单个视频对象。成功上传的 HTTP 状态为 <code>201</code>。</p>
+            <ApiCode>{videoResponseExample}</ApiCode>
+            <div className="api-doc-field-table">{videoFields.map(([field, description]) => <span key={field}><b>{field}</b><small>{description}</small></span>)}</div>
+            <p className="api-doc-note">视频公开地址不要求登录，删除和列表接口仍只允许所有者或其 Bearer 密钥访问。媒体响应支持 <code>Accept-Ranges: bytes</code>；请求 <code>Range: bytes=0-1048575</code> 时返回 <code>206 Partial Content</code>。</p>
           </section>
 
           <section id="api-doc-endpoints">

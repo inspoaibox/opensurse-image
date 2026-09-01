@@ -19,6 +19,30 @@ export class StorageManagerError extends Error {
 const trimSlashes = (value) => String(value || '').trim().replace(/^\/+|\/+$/g, '')
 const trimTrailingSlash = (value) => String(value || '').trim().replace(/\/+$/g, '')
 const encodeObjectKey = (value) => String(value).split('/').map(encodeURIComponent).join('/')
+const validRangeHeader = (value) => /^bytes=\d*-\d*$/.test(String(value || '').trim())
+
+const parseRangeHeader = (value, totalLength) => {
+  const rangeHeader = String(value || '').trim()
+  if (!validRangeHeader(rangeHeader)) return null
+  const [, startPart, endPart] = rangeHeader.match(/^bytes=(\d*)-(\d*)$/) || []
+  if (!startPart && !endPart) return null
+
+  let start
+  let end
+  if (!startPart) {
+    const suffixLength = Number(endPart)
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) return null
+    start = Math.max(totalLength - suffixLength, 0)
+    end = totalLength - 1
+  } else {
+    start = Number(startPart)
+    end = endPart ? Number(endPart) : totalLength - 1
+  }
+
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start) return null
+  if (start >= totalLength) throw new StorageManagerError('请求的媒体范围无效', 416)
+  return { start, end: Math.min(end, totalLength - 1) }
+}
 
 const requireHttpUrl = (value, label) => {
   try {
@@ -172,6 +196,7 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
       config: publicConfig,
       credentials,
       imageCount: Number(row.image_count || 0),
+      videoCount: Number(row.video_count || 0),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -197,10 +222,10 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
   ensureLocalProvider()
 
   const listProviders = () => db.prepare(`
-    SELECT storage_providers.*, COUNT(images.id) AS image_count
+    SELECT storage_providers.*,
+      (SELECT COUNT(*) FROM images WHERE images.storage_provider_id = storage_providers.id) AS image_count,
+      (SELECT COUNT(*) FROM videos WHERE videos.storage_provider_id = storage_providers.id) AS video_count
     FROM storage_providers
-    LEFT JOIN images ON images.storage_provider_id = storage_providers.id
-    GROUP BY storage_providers.id
     ORDER BY storage_providers.is_default DESC, storage_providers.created_at ASC
   `).all().map(mapProvider)
 
@@ -249,6 +274,8 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
     if (assignedUsers > 0) throw new StorageManagerError(`该存储仍分配给 ${assignedUsers} 位用户，请先调整用户存储策略`, 409)
     const imageCount = Number(db.prepare('SELECT COUNT(*) AS count FROM images WHERE storage_provider_id = ?').get(id).count)
     if (imageCount > 0) throw new StorageManagerError(`该存储仍有 ${imageCount} 张图片，不能删除`, 409)
+    const videoCount = Number(db.prepare('SELECT COUNT(*) AS count FROM videos WHERE storage_provider_id = ?').get(id).count)
+    if (videoCount > 0) throw new StorageManagerError(`该存储仍有 ${videoCount} 个视频，不能删除`, 409)
     db.prepare('DELETE FROM storage_providers WHERE id = ?').run(id)
   }
 
@@ -411,11 +438,12 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
     if (![200, 204, 404].includes(response.status)) throw new StorageManagerError(`WebDAV 删除失败（HTTP ${response.status}）`, 502)
   }
 
-  const openStoredObject = async (image) => {
+  const openStoredObject = async (image, options = {}) => {
     if (!image.filename && !image.storage_key) throw new StorageManagerError('图片原文件不存在', 404)
     const providerId = image.storage_provider_id || 'local'
     const provider = providerWithConfig(providerId)
     const storageKey = image.storage_key || `${image.owner_id}/${image.filename}`
+    const rangeHeader = validRangeHeader(options.rangeHeader) ? String(options.rangeHeader).trim() : ''
 
     if (provider.type === 'local') {
       const target = path.resolve(uploadsDir, storageKey)
@@ -423,20 +451,39 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
         throw new StorageManagerError('图片原文件不存在', 404)
       }
       const stat = fs.statSync(target)
-      return { body: fs.createReadStream(target), contentLength: stat.size, cleanup: () => {} }
+      const range = parseRangeHeader(rangeHeader, stat.size)
+      if (range) {
+        return {
+          body: fs.createReadStream(target, range),
+          contentLength: range.end - range.start + 1,
+          totalLength: stat.size,
+          contentRange: `bytes ${range.start}-${range.end}/${stat.size}`,
+          acceptRanges: 'bytes',
+          statusCode: 206,
+          cleanup: () => {},
+        }
+      }
+      return { body: fs.createReadStream(target), contentLength: stat.size, totalLength: stat.size, acceptRanges: 'bytes', cleanup: () => {} }
     }
 
     if (S3_TYPES.has(provider.type)) {
       const client = createS3Client(provider)
       try {
-        const object = await client.send(new GetObjectCommand({ Bucket: provider.config.bucket, Key: storageKey }))
+        const object = await client.send(new GetObjectCommand({
+          Bucket: provider.config.bucket,
+          Key: storageKey,
+          ...(rangeHeader ? { Range: rangeHeader } : {}),
+        }))
         if (!object.Body) throw new StorageManagerError('对象存储没有返回文件内容', 502)
         return {
           body: object.Body,
           contentLength: object.ContentLength,
+          contentRange: object.ContentRange,
           contentType: object.ContentType,
           etag: object.ETag,
           lastModified: object.LastModified,
+          acceptRanges: object.AcceptRanges || 'bytes',
+          statusCode: object.ContentRange ? 206 : 200,
           cleanup: () => client.destroy(),
         }
       } catch (error) {
@@ -445,15 +492,20 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
       }
     }
 
-    const response = await webdavRequest(provider.config, 'GET', storageKey)
+    const response = await webdavRequest(provider.config, 'GET', storageKey, {
+      headers: rangeHeader ? { Range: rangeHeader } : {},
+    })
     if (response.status === 404) throw new StorageManagerError('图片原文件不存在', 404)
     if (!response.ok || !response.body) throw new StorageManagerError(`WebDAV 读取失败（HTTP ${response.status}）`, 502)
     return {
       body: Readable.fromWeb(response.body),
       contentLength: Number(response.headers.get('content-length') || 0) || undefined,
+      contentRange: response.headers.get('content-range') || undefined,
       contentType: response.headers.get('content-type') || undefined,
       etag: response.headers.get('etag') || undefined,
       lastModified: response.headers.get('last-modified') || undefined,
+      acceptRanges: response.headers.get('accept-ranges') || (rangeHeader ? 'bytes' : undefined),
+      statusCode: response.status === 206 ? 206 : 200,
       cleanup: () => {},
     }
   }
