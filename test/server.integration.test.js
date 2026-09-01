@@ -206,6 +206,27 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.match(video.url, /\/media\/video\/[^/]+\/.+\.mp4$/)
   assert.equal(video.links.html.includes('<video controls'), true)
 
+  const imageDirectory = path.join(tempDirectory, 'media-images')
+  const videoDirectory = path.join(tempDirectory, 'media-videos')
+  const localStorageUpdate = await requestJson(`${baseUrl}/api/storage/providers/local`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+    body: JSON.stringify({
+      name: '本地文件系统',
+      config: { imagePathPrefix: imageDirectory, videoPathPrefix: videoDirectory },
+    }),
+  })
+  assert.equal(localStorageUpdate.response.status, 200)
+  assert.equal(localStorageUpdate.body.config.imagePathPrefix, path.normalize(imageDirectory))
+  assert.equal(localStorageUpdate.body.config.videoPathPrefix, path.normalize(videoDirectory))
+
+  const oldImageAfterStorageUpdate = await fetch(image.url)
+  assert.equal(oldImageAfterStorageUpdate.status, 200)
+  assert.deepEqual(Buffer.from(await oldImageAfterStorageUpdate.arrayBuffer()), png)
+  const oldVideoAfterStorageUpdate = await fetch(video.url)
+  assert.equal(oldVideoAfterStorageUpdate.status, 200)
+  assert.deepEqual(Buffer.from(await oldVideoAfterStorageUpdate.arrayBuffer()), videoBytes)
+
   const videoList = await requestJson(`${baseUrl}/api/videos`, { headers: { Cookie: memberCookie } })
   assert.equal(videoList.response.status, 200)
   assert.equal(videoList.body.length, 1)
@@ -267,6 +288,59 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   const statsAfterVideoDeletion = await requestJson(`${baseUrl}/api/stats`, { headers: { Cookie: memberCookie } })
   assert.equal(statsAfterVideoDeletion.body.videos, 0)
   assert.equal(statsAfterVideoDeletion.body.used, statsBeforeVideo.body.used)
+
+  const separatedImageForm = new FormData()
+  separatedImageForm.append('files', new Blob([png], { type: 'image/png' }), '分目录图片.png')
+  const separatedImageUpload = await requestJson(`${baseUrl}/api/images`, { method: 'POST', headers: { Cookie: memberCookie }, body: separatedImageForm })
+  assert.equal(separatedImageUpload.response.status, 201)
+  const separatedImage = separatedImageUpload.body[0]
+  const separatedImageFiles = await fs.readdir(path.join(imageDirectory, memberId))
+  assert.equal(separatedImageFiles.length, 1)
+  assert.deepEqual(await fs.readFile(path.join(imageDirectory, memberId, separatedImageFiles[0])), png)
+
+  const separatedVideoForm = new FormData()
+  separatedVideoForm.append('files', new Blob([videoBytes], { type: 'video/mp4' }), '分目录视频.mp4')
+  const separatedVideoUpload = await requestJson(`${baseUrl}/api/videos`, { method: 'POST', headers: { Cookie: memberCookie }, body: separatedVideoForm })
+  assert.equal(separatedVideoUpload.response.status, 201)
+  const separatedVideo = separatedVideoUpload.body[0]
+  const separatedVideoFiles = await fs.readdir(path.join(videoDirectory, memberId))
+  assert.equal(separatedVideoFiles.length, 1)
+  assert.deepEqual(await fs.readFile(path.join(videoDirectory, memberId, separatedVideoFiles[0])), videoBytes)
+  assert.notEqual(path.resolve(imageDirectory), path.resolve(videoDirectory))
+
+  const separatedImageDeletion = await fetch(`${baseUrl}/api/images/${separatedImage.id}`, { method: 'DELETE', headers: { Cookie: memberCookie } })
+  assert.equal(separatedImageDeletion.status, 204)
+  const separatedVideoDeletion = await fetch(`${baseUrl}/api/videos/${separatedVideo.id}`, { method: 'DELETE', headers: { Cookie: memberCookie } })
+  assert.equal(separatedVideoDeletion.status, 204)
+
+  const legacyDirectory = path.join(tempDirectory, 'legacy-media')
+  const legacyStorageUpdate = await requestJson(`${baseUrl}/api/storage/providers/local`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+    body: JSON.stringify({ config: { pathPrefix: legacyDirectory } }),
+  })
+  assert.equal(legacyStorageUpdate.response.status, 200)
+  assert.equal(legacyStorageUpdate.body.config.imagePathPrefix, path.normalize(legacyDirectory))
+  assert.equal(legacyStorageUpdate.body.config.videoPathPrefix, path.normalize(legacyDirectory))
+
+  const legacyImageForm = new FormData()
+  legacyImageForm.append('files', new Blob([png], { type: 'image/png' }), '旧前缀兼容.png')
+  const legacyImageUpload = await requestJson(`${baseUrl}/api/images`, { method: 'POST', headers: { Cookie: memberCookie }, body: legacyImageForm })
+  assert.equal(legacyImageUpload.response.status, 201)
+  const legacyImageFiles = await fs.readdir(path.join(legacyDirectory, memberId))
+  assert.equal(legacyImageFiles.length, 1)
+  assert.deepEqual(await fs.readFile(path.join(legacyDirectory, memberId, legacyImageFiles[0])), png)
+  const legacyImageDeletion = await fetch(`${baseUrl}/api/images/${legacyImageUpload.body[0].id}`, { method: 'DELETE', headers: { Cookie: memberCookie } })
+  assert.equal(legacyImageDeletion.status, 204)
+
+  const clearedStorageUpdate = await requestJson(`${baseUrl}/api/storage/providers/local`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+    body: JSON.stringify({ config: { imagePathPrefix: '', videoPathPrefix: '' } }),
+  })
+  assert.equal(clearedStorageUpdate.response.status, 200)
+  assert.equal(clearedStorageUpdate.body.config.imagePathPrefix, '')
+  assert.equal(clearedStorageUpdate.body.config.videoPathPrefix, '')
 
   const apiKey = await requestJson(`${baseUrl}/api/api-keys`, {
     method: 'POST',

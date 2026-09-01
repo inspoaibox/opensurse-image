@@ -458,6 +458,8 @@ kbd { border: 1px solid #dfe5e0; background: white; color: #99a39f; padding: 2px
 .storage-form-grid { margin-top: 20px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .storage-form-grid label { min-width: 0; display: flex; flex-direction: column; gap: 6px; color: #596b66; font-size: 14px; }
 .storage-form-grid label > span { font-weight: 500; }
+.storage-field-hint { color: #87948f; font-size: 13px; line-height: 1.5; }
+.storage-field-hint code { color: #526a63; font-size: 12px; overflow-wrap: anywhere; }
 .storage-form-grid input, .storage-form-grid select { width: 100%; height: 42px; border: 1px solid #d8e1dc; border-radius: 8px; background: white; color: #354c47; padding: 0 11px; outline: 0; font-size: 14px; }
 .storage-form-grid input:focus, .storage-form-grid select:focus { border-color: #78a096; box-shadow: 0 0 0 3px rgba(79,131,121,.1); }
 .storage-form-grid input::placeholder { color: #a6afac; }

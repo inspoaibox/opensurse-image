@@ -115,12 +115,16 @@ const storageTypeLabels: Record<StorageProviderType, string> = {
 }
 
 const storageProviderSummary = (provider: StorageProviderItem) => {
-  if (provider.type === 'local') return 'server/uploads · SQLite 元数据'
-  if (provider.type === 'webdav') return provider.config.baseUrl || '尚未配置服务地址'
+  const imagePath = provider.config.imagePathPrefix || (provider.type === 'local' ? 'server/uploads' : '根目录')
+  const videoPath = provider.config.videoPathPrefix || (provider.type === 'local' ? 'server/uploads' : '根目录')
+  if (provider.type === 'local') return `图片：${imagePath} · 视频：${videoPath} · SQLite 元数据`
+  if (provider.type === 'webdav') return `${provider.config.baseUrl || '尚未配置服务地址'} · 图片：${imagePath} · 视频：${videoPath}`
   return [
     provider.config.bucket,
     provider.config.region || provider.config.endpoint,
     provider.config.useInternalEndpoint ? '内网读写' : '',
+    `图片：${imagePath}`,
+    `视频：${videoPath}`,
   ].filter(Boolean).join(' · ')
 }
 
@@ -1787,14 +1791,14 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
           {provider.isDefault && <span className="storage-current"><CheckCircle2 size={14} /> 当前使用</span>}
           {user.role === 'admin' && <div className="storage-provider-actions">
             <button className="button button-ghost" onClick={() => void testStorageProvider(provider)}><CheckCircle2 size={15} /> 检测</button>
-            {provider.type !== 'local' && <button className="icon-button" onClick={() => { setEditingStorageProvider(provider); setStorageModalOpen(true) }} aria-label={`编辑${provider.name}`} title="编辑配置"><Settings size={16} /></button>}
+            <button className="icon-button" onClick={() => { setEditingStorageProvider(provider); setStorageModalOpen(true) }} aria-label={`编辑${provider.name}`} title="编辑配置"><Settings size={16} /></button>
             {!provider.isDefault && <button className="button button-secondary" onClick={() => void activateStorageProvider(provider)}><Check size={15} /> 设为当前</button>}
             {provider.type !== 'local' && !provider.isDefault && <button className="icon-button storage-delete-button" onClick={() => void deleteStorageProvider(provider)} aria-label={`删除${provider.name}`} title="删除配置"><Trash2 size={16} /></button>}
           </div>}
         </div>)}
       </div>}
       {user.role === 'admin' && <button className="add-provider" onClick={() => { setEditingStorageProvider(null); setStorageModalOpen(true) }}><Plus size={17} /> 添加云存储或 WebDAV</button>}
-      <div className="settings-note"><ShieldCheck size={15} /><span>切换只影响新上传；历史图片仍保留在原存储中，删除时会自动使用对应的存储配置。</span></div>
+      <div className="settings-note"><ShieldCheck size={15} /><span>目录或路径前缀只影响新上传；历史图片和视频不会自动移动，删除时会继续使用文件原来的存储位置。</span></div>
     </section>
     <section className="section-card settings-card"><div className="settings-heading"><span className="metric-icon orange"><Link2 size={19} /></span><div><h3>访问域名</h3><p>图片直链由服务器生产配置统一生成</p></div><span className="status-pill">服务器配置</span></div><div className="settings-note"><Link2 size={15} /><span>当前浏览器地址：<code>{window.location.origin}</code>。生产环境请通过 <code>PICNEST_PUBLIC_URL</code> 设置唯一 HTTPS 公网域名，避免不同用户生成不一致的链接。</span></div></section>
   </>
@@ -1869,7 +1873,8 @@ function StorageProviderModal({ provider, onClose, onSave }: {
     bucket: provider?.config.bucket || '',
     accessKeyId: '',
     secretAccessKey: '',
-    pathPrefix: provider?.config.pathPrefix || '',
+    imagePathPrefix: provider?.config.imagePathPrefix ?? provider?.config.pathPrefix ?? '',
+    videoPathPrefix: provider?.config.videoPathPrefix ?? provider?.config.pathPrefix ?? '',
     forcePathStyle: Boolean(provider?.config.forcePathStyle),
     useInternalEndpoint: Boolean(provider?.config.useInternalEndpoint),
     baseUrl: provider?.config.baseUrl || '',
@@ -1879,6 +1884,7 @@ function StorageProviderModal({ provider, onClose, onSave }: {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const editing = Boolean(provider)
+  const isLocal = type === 'local'
   const isWebdav = type === 'webdav'
   const isGenericS3 = type === 's3-compatible'
   const supportsAutomaticInternalEndpoint = type === 'tencent-cos' || type === 'aliyun-oss'
@@ -1918,8 +1924,12 @@ function StorageProviderModal({ provider, onClose, onSave }: {
         <p>连接信息会加密保存在本机 SQLite 中。</p>
         <div className="storage-form-grid">
           <label><span>显示名称</span><input value={name} onChange={(event) => setName(event.target.value)} required minLength={2} maxLength={100} /></label>
-          <label><span>存储类型</span><select value={type} disabled={editing} onChange={(event) => changeType(event.target.value as StorageProviderType)}><option value="tencent-cos">腾讯云 COS</option><option value="aliyun-oss">阿里云 OSS</option><option value="huawei-obs">华为云 OBS</option><option value="webdav">WebDAV</option><option value="s3-compatible">S3 兼容存储</option></select></label>
-          {isWebdav ? <>
+          <label><span>存储类型</span><select value={type} disabled={editing} onChange={(event) => changeType(event.target.value as StorageProviderType)}>{editing && <option value="local">本地文件系统</option>}<option value="tencent-cos">腾讯云 COS</option><option value="aliyun-oss">阿里云 OSS</option><option value="huawei-obs">华为云 OBS</option><option value="webdav">WebDAV</option><option value="s3-compatible">S3 兼容存储</option></select></label>
+          {isLocal ? <>
+            <label><span>图片存储目录</span><input value={String(config.imagePathPrefix)} onChange={(event) => setField('imagePathPrefix', event.target.value)} placeholder="留空使用 server/uploads" /></label>
+            <label><span>视频存储目录</span><input value={String(config.videoPathPrefix)} onChange={(event) => setField('videoPathPrefix', event.target.value)} placeholder="留空使用 server/uploads" /></label>
+            <div className="storage-field-hint field-wide">支持相对目录（相对于 server/uploads）或绝对路径，例如 <code>D:\PicNest\images</code>。</div>
+          </> : isWebdav ? <>
             <label className="field-wide"><span>WebDAV 服务地址</span><input type="url" value={String(config.baseUrl)} onChange={(event) => setField('baseUrl', event.target.value)} placeholder="https://dav.example.com/remote.php/dav/files/user/picnest" required /></label>
             <label><span>用户名</span><input value={String(config.username)} onChange={(event) => setField('username', event.target.value)} autoComplete="username" /></label>
             <label><span>密码</span><input type="password" value={String(config.password)} onChange={(event) => setField('password', event.target.value)} autoComplete="new-password" placeholder={credentialPlaceholder(Boolean(provider?.credentials.password), 'WebDAV 密码')} /></label>
@@ -1932,7 +1942,7 @@ function StorageProviderModal({ provider, onClose, onSave }: {
             <label><span>SecretKey</span><input type="password" value={String(config.secretAccessKey)} onChange={(event) => setField('secretAccessKey', event.target.value)} autoComplete="new-password" placeholder={credentialPlaceholder(Boolean(provider?.credentials.secretAccessKey), 'SecretKey')} required={!provider?.credentials.secretAccessKey} /></label>
             {isGenericS3 && <label className="storage-checkbox field-wide"><input type="checkbox" checked={Boolean(config.forcePathStyle)} onChange={(event) => setField('forcePathStyle', event.target.checked)} /><span>使用 Path-style Bucket 地址</span></label>}
           </>}
-          <label className="field-wide"><span>对象路径前缀（可选）</span><input value={String(config.pathPrefix)} onChange={(event) => setField('pathPrefix', event.target.value)} placeholder="picnest/images" /></label>
+          {!isLocal && <><label><span>图片对象路径前缀（可选）</span><input value={String(config.imagePathPrefix)} onChange={(event) => setField('imagePathPrefix', event.target.value)} placeholder="picnest/images" /></label><label><span>视频对象路径前缀（可选）</span><input value={String(config.videoPathPrefix)} onChange={(event) => setField('videoPathPrefix', event.target.value)} placeholder="picnest/videos" /></label><div className="storage-field-hint field-wide">图片和视频可以使用不同的目录；留空时直接写入当前服务的根目录。</div></>}
         </div>
         {error && <p className="auth-error">{error}</p>}
         <div className="storage-modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button className="button button-primary" disabled={submitting}><Check size={16} /> {submitting ? '正在保存…' : '保存配置'}</button></div>

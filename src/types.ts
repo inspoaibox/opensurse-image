@@ -42,6 +42,8 @@ export interface StorageProviderConfig {
   region?: string
   endpoint?: string
   bucket?: string
+  imagePathPrefix?: string
+  videoPathPrefix?: string
   pathPrefix?: string
   forcePathStyle?: boolean
   useInternalEndpoint?: boolean

@@ -20,6 +20,17 @@ const trimSlashes = (value) => String(value || '').trim().replace(/^\/+|\/+$/g, 
 const trimTrailingSlash = (value) => String(value || '').trim().replace(/\/+$/g, '')
 const encodeObjectKey = (value) => String(value).split('/').map(encodeURIComponent).join('/')
 const validRangeHeader = (value) => /^bytes=\d*-\d*$/.test(String(value || '').trim())
+const localAbsoluteKeyPrefix = 'local-absolute-v1:'
+const mediaPathFields = { image: 'imagePathPrefix', video: 'videoPathPrefix' }
+const moveFileSync = (source, destination) => {
+  try {
+    fs.renameSync(source, destination)
+  } catch (error) {
+    if (error?.code !== 'EXDEV') throw error
+    fs.copyFileSync(source, destination)
+    fs.unlinkSync(source)
+  }
+}
 
 const parseRangeHeader = (value, totalLength) => {
   const rangeHeader = String(value || '').trim()
@@ -58,12 +69,22 @@ const requireHttpUrl = (value, label) => {
 }
 
 const normalizePathPrefix = (value) => {
-  const prefix = trimSlashes(value)
+  const prefix = trimSlashes(String(value || '').replaceAll('\\', '/'))
   if (prefix.length > 512) throw new StorageManagerError('对象路径前缀不能超过 512 个字符')
   if (prefix.split('/').some((part) => part === '.' || part === '..')) {
     throw new StorageManagerError('对象路径前缀不能包含 . 或 .. 路径段')
   }
   return prefix
+}
+
+const normalizeLocalDirectory = (value) => {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  if (!path.isAbsolute(raw)) return normalizePathPrefix(raw)
+  const directory = path.normalize(raw)
+  if (directory === path.parse(directory).root) throw new StorageManagerError('本地存储目录不能直接使用文件系统根目录')
+  if (directory.length > 2048) throw new StorageManagerError('本地存储目录不能超过 2048 个字符')
+  return directory
 }
 
 export const endpointFor = (type, config) => {
@@ -142,13 +163,40 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
     }
   }
 
+  const readProviderConfig = (row) => {
+    if (!row.config_encrypted) return {}
+    if (row.type === 'local' && row.config_encrypted === 'local') return {}
+    return decryptConfig(row.config_encrypted)
+  }
+
+  const pathPrefixFor = (config, mediaType) => {
+    const field = mediaPathFields[mediaType] || mediaPathFields.image
+    return String(config[field] ?? config.pathPrefix ?? '').trim()
+  }
+
+  const normalizedConfigForDisplay = (type, rawConfig) => {
+    const config = { ...(rawConfig || {}) }
+    const legacyPrefix = String(config.pathPrefix || '')
+    config.imagePathPrefix = config.imagePathPrefix ?? legacyPrefix
+    config.videoPathPrefix = config.videoPathPrefix ?? legacyPrefix
+    delete config.pathPrefix
+    if (type === 'local') {
+      config.imagePathPrefix = normalizeLocalDirectory(config.imagePathPrefix)
+      config.videoPathPrefix = normalizeLocalDirectory(config.videoPathPrefix)
+    } else {
+      config.imagePathPrefix = normalizePathPrefix(config.imagePathPrefix)
+      config.videoPathPrefix = normalizePathPrefix(config.videoPathPrefix)
+    }
+    return config
+  }
+
   const normalizeConfig = (type, incoming, current = {}) => {
     const source = incoming && typeof incoming === 'object' ? incoming : {}
     const allowed = type === 'webdav'
-      ? ['baseUrl', 'username', 'password', 'pathPrefix']
+      ? ['baseUrl', 'username', 'password', 'imagePathPrefix', 'videoPathPrefix']
       : type === 'local'
-        ? []
-        : ['region', 'endpoint', 'bucket', 'accessKeyId', 'secretAccessKey', 'pathPrefix', 'forcePathStyle', 'useInternalEndpoint']
+        ? ['imagePathPrefix', 'videoPathPrefix']
+        : ['region', 'endpoint', 'bucket', 'accessKeyId', 'secretAccessKey', 'imagePathPrefix', 'videoPathPrefix', 'forcePathStyle', 'useInternalEndpoint']
     const config = {}
 
     for (const key of allowed) {
@@ -157,12 +205,27 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
         config[key] = Object.hasOwn(source, key) ? source[key] : Boolean(current[key])
         continue
       }
-      const value = Object.hasOwn(source, key) ? String(source[key] || '').trim() : ''
+      const isPathField = key === 'imagePathPrefix' || key === 'videoPathPrefix'
+      const hasExplicitValue = Object.hasOwn(source, key) || (isPathField && Object.hasOwn(source, 'pathPrefix'))
+      const legacyPrefix = Object.hasOwn(source, 'pathPrefix')
+        ? source.pathPrefix
+        : current[key] ?? current.pathPrefix ?? ''
+      const value = String(Object.hasOwn(source, key) ? source[key] : legacyPrefix || '').trim()
       if (value.length > 2048) throw new StorageManagerError(`${key} 不能超过 2048 个字符`)
-      config[key] = SECRET_FIELDS.has(key) && !value ? String(current[key] || '') : value || String(current[key] || '')
+      config[key] = isPathField && hasExplicitValue
+        ? value
+        : SECRET_FIELDS.has(key) && !value
+          ? String(current[key] || '')
+          : value || String(current[key] || '')
     }
 
-    config.pathPrefix = normalizePathPrefix(config.pathPrefix)
+    if (type === 'local') {
+      config.imagePathPrefix = normalizeLocalDirectory(config.imagePathPrefix)
+      config.videoPathPrefix = normalizeLocalDirectory(config.videoPathPrefix)
+    } else {
+      config.imagePathPrefix = normalizePathPrefix(config.imagePathPrefix)
+      config.videoPathPrefix = normalizePathPrefix(config.videoPathPrefix)
+    }
     if (type === 'webdav') {
       if (!config.baseUrl) throw new StorageManagerError('请填写 WebDAV 服务地址')
       config.baseUrl = requireHttpUrl(config.baseUrl, 'WebDAV 服务地址')
@@ -177,11 +240,11 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
       if (config.endpoint) config.endpoint = requireHttpUrl(config.endpoint, 'Endpoint')
       return config
     }
-    return {}
+    return config
   }
 
   const mapProvider = (row) => {
-    const config = row.type === 'local' ? {} : decryptConfig(row.config_encrypted)
+    const config = normalizedConfigForDisplay(row.type, readProviderConfig(row))
     const publicConfig = { ...config }
     const credentials = {}
     for (const field of SECRET_FIELDS) {
@@ -206,7 +269,7 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
   const providerWithConfig = (id) => {
     const row = providerRow(id)
     if (!row) throw new StorageManagerError('存储服务不存在', 404)
-    return { ...row, config: row.type === 'local' ? {} : decryptConfig(row.config_encrypted) }
+    return { ...row, config: normalizedConfigForDisplay(row.type, readProviderConfig(row)) }
   }
 
   const ensureLocalProvider = () => {
@@ -214,7 +277,7 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
     db.prepare(`
       INSERT OR IGNORE INTO storage_providers (id, name, type, config_encrypted, is_default, created_at, updated_at)
       VALUES ('local', '本地文件系统', 'local', ?, 0, ?, ?)
-    `).run('local', now, now)
+    `).run(encryptConfig({ imagePathPrefix: '', videoPathPrefix: '' }), now, now)
     const current = db.prepare('SELECT id FROM storage_providers WHERE is_default = 1 LIMIT 1').get()
     if (!current) db.prepare("UPDATE storage_providers SET is_default = CASE WHEN id = 'local' THEN 1 ELSE 0 END").run()
   }
@@ -244,7 +307,6 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
   }
 
   const updateProvider = (id, { name, config }) => {
-    if (id === 'local') throw new StorageManagerError('本地存储无需修改')
     const current = providerWithConfig(id)
     const normalizedName = String(name || current.name).trim()
     if (normalizedName.length < 2 || normalizedName.length > 100) throw new StorageManagerError('存储名称需要 2 到 100 个字符')
@@ -294,66 +356,102 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
   const testProvider = async (id) => {
     const provider = providerWithConfig(id)
     if (provider.type === 'local') {
-      const testFile = path.join(uploadsDir, `.picnest-write-test-${crypto.randomUUID()}`)
-      fs.writeFileSync(testFile, 'ok')
-      fs.unlinkSync(testFile)
+      for (const mediaType of ['image', 'video']) {
+        const configuredDirectory = pathPrefixFor(provider.config, mediaType)
+        const root = path.isAbsolute(configuredDirectory)
+          ? path.resolve(configuredDirectory)
+          : path.resolve(uploadsDir, configuredDirectory)
+        const testFile = path.join(root, `.picnest-write-test-${crypto.randomUUID()}`)
+        fs.mkdirSync(root, { recursive: true })
+        fs.writeFileSync(testFile, 'ok')
+        fs.unlinkSync(testFile)
+      }
       return
     }
     if (S3_TYPES.has(provider.type)) {
       const client = createS3Client(provider)
-      const testKey = provider.config.pathPrefix
-        ? `${provider.config.pathPrefix}/.picnest-write-test-${crypto.randomUUID()}`
-        : `.picnest-write-test-${crypto.randomUUID()}`
       try {
-        await client.send(new PutObjectCommand({
-          Bucket: provider.config.bucket,
-          Key: testKey,
-          Body: 'PicNest storage connection test',
-          ContentLength: 31,
-          ContentType: 'text/plain; charset=utf-8',
-        }))
-        try {
-          const readResult = await client.send(new GetObjectCommand({ Bucket: provider.config.bucket, Key: testKey }))
-          if (!readResult.Body) throw new StorageManagerError('对象存储读取检测没有返回文件内容', 502)
-          const chunks = []
-          for await (const chunk of readResult.Body) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
-          if (Buffer.concat(chunks).toString('utf8') !== 'PicNest storage connection test') {
-            throw new StorageManagerError('对象存储读取检测返回的内容不一致', 502)
+        for (const mediaType of ['image', 'video']) {
+          const prefix = pathPrefixFor(provider.config, mediaType)
+          const testKey = prefix
+            ? `${prefix}/.picnest-write-test-${crypto.randomUUID()}`
+            : `.picnest-write-test-${crypto.randomUUID()}`
+          await client.send(new PutObjectCommand({
+            Bucket: provider.config.bucket,
+            Key: testKey,
+            Body: 'PicNest storage connection test',
+            ContentLength: 31,
+            ContentType: 'text/plain; charset=utf-8',
+          }))
+          try {
+            const readResult = await client.send(new GetObjectCommand({ Bucket: provider.config.bucket, Key: testKey }))
+            if (!readResult.Body) throw new StorageManagerError('对象存储读取检测没有返回文件内容', 502)
+            const chunks = []
+            for await (const chunk of readResult.Body) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+            if (Buffer.concat(chunks).toString('utf8') !== 'PicNest storage connection test') {
+              throw new StorageManagerError('对象存储读取检测返回的内容不一致', 502)
+            }
+          } finally {
+            await client.send(new DeleteObjectCommand({ Bucket: provider.config.bucket, Key: testKey }))
           }
-        } finally {
-          await client.send(new DeleteObjectCommand({ Bucket: provider.config.bucket, Key: testKey }))
         }
       } finally {
         client.destroy()
       }
       return
     }
-    const testKey = provider.config.pathPrefix
-      ? `${provider.config.pathPrefix}/.picnest-write-test-${crypto.randomUUID()}`
-      : `.picnest-write-test-${crypto.randomUUID()}`
-    await ensureWebdavDirectories(provider.config, testKey)
-    const putResponse = await webdavRequest(provider.config, 'PUT', testKey, {
-      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-      body: 'PicNest storage connection test',
-    })
-    if (![200, 201, 204].includes(putResponse.status)) throw new StorageManagerError(`WebDAV 写入检测失败（HTTP ${putResponse.status}）`, 502)
-    let readError = null
-    try {
-      const getResponse = await webdavRequest(provider.config, 'GET', testKey)
-      if (!getResponse.ok || await getResponse.text() !== 'PicNest storage connection test') {
-        throw new StorageManagerError(`WebDAV 读取检测失败（HTTP ${getResponse.status}）`, 502)
+    for (const mediaType of ['image', 'video']) {
+      const prefix = pathPrefixFor(provider.config, mediaType)
+      const testKey = prefix
+        ? `${prefix}/.picnest-write-test-${crypto.randomUUID()}`
+        : `.picnest-write-test-${crypto.randomUUID()}`
+      await ensureWebdavDirectories(provider.config, testKey)
+      const putResponse = await webdavRequest(provider.config, 'PUT', testKey, {
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        body: 'PicNest storage connection test',
+      })
+      if (![200, 201, 204].includes(putResponse.status)) throw new StorageManagerError(`WebDAV 写入检测失败（HTTP ${putResponse.status}）`, 502)
+      let readError = null
+      try {
+        const getResponse = await webdavRequest(provider.config, 'GET', testKey)
+        if (!getResponse.ok || await getResponse.text() !== 'PicNest storage connection test') {
+          throw new StorageManagerError(`WebDAV 读取检测失败（HTTP ${getResponse.status}）`, 502)
+        }
+      } catch (error) {
+        readError = error
       }
-    } catch (error) {
-      readError = error
+      const deleteResponse = await webdavRequest(provider.config, 'DELETE', testKey)
+      if (![200, 204].includes(deleteResponse.status)) throw new StorageManagerError(`WebDAV 删除检测失败（HTTP ${deleteResponse.status}）`, 502)
+      if (readError) throw readError
     }
-    const deleteResponse = await webdavRequest(provider.config, 'DELETE', testKey)
-    if (![200, 204].includes(deleteResponse.status)) throw new StorageManagerError(`WebDAV 删除检测失败（HTTP ${deleteResponse.status}）`, 502)
-    if (readError) throw readError
   }
 
-  const storageKeyFor = (provider, userId, filename) => {
+  const storageKeyFor = (provider, userId, filename, mediaType = 'image') => {
     const relativeKey = `${userId}/${filename}`
-    return provider.config.pathPrefix ? `${provider.config.pathPrefix}/${relativeKey}` : relativeKey
+    const prefix = pathPrefixFor(provider.config, mediaType)
+    if (provider.type !== 'local') return prefix ? `${prefix}/${relativeKey}` : relativeKey
+    if (!path.isAbsolute(prefix)) return prefix ? `${prefix}/${relativeKey}` : relativeKey
+    return `${localAbsoluteKeyPrefix}${JSON.stringify({ root: path.resolve(prefix), relativeKey })}`
+  }
+
+  const localTargetFor = (storageKey) => {
+    let root = path.resolve(uploadsDir)
+    let relativeKey = storageKey
+    if (String(storageKey).startsWith(localAbsoluteKeyPrefix)) {
+      try {
+        const parsed = JSON.parse(String(storageKey).slice(localAbsoluteKeyPrefix.length))
+        if (!parsed || typeof parsed.root !== 'string' || !path.isAbsolute(parsed.root) || typeof parsed.relativeKey !== 'string' || !parsed.relativeKey) {
+          throw new Error('invalid local path record')
+        }
+        root = path.resolve(parsed.root)
+        relativeKey = parsed.relativeKey
+      } catch {
+        throw new StorageManagerError('本地存储路径无效', 500)
+      }
+    }
+    const target = path.resolve(root, relativeKey)
+    if (target !== root && !target.startsWith(`${root}${path.sep}`)) throw new StorageManagerError('本地存储路径无效', 500)
+    return target
   }
 
   const getDefaultProviderId = () => (db.prepare('SELECT id FROM storage_providers WHERE is_default = 1 LIMIT 1').get()?.id || 'local')
@@ -363,22 +461,21 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
     return getDefaultProviderId()
   }
 
-  const storeFile = async (userId, file, providerId = getDefaultProviderId()) => {
+  const storeFile = async (userId, file, providerId = getDefaultProviderId(), mediaType = 'image') => {
     const selectedRow = providerRow(providerId)
     if (!selectedRow) throw new StorageManagerError('当前存储服务不存在', 500)
     activeWrites.set(providerId, (activeWrites.get(providerId) || 0) + 1)
     try {
       const provider = {
         ...selectedRow,
-        config: selectedRow.type === 'local' ? {} : decryptConfig(selectedRow.config_encrypted),
+        config: normalizedConfigForDisplay(selectedRow.type, readProviderConfig(selectedRow)),
       }
-      const storageKey = storageKeyFor(provider, userId, file.filename)
+      const storageKey = storageKeyFor(provider, userId, file.filename, mediaType)
 
       if (provider.type === 'local') {
-        const destination = path.resolve(uploadsDir, storageKey)
-        if (!destination.startsWith(`${path.resolve(uploadsDir)}${path.sep}`)) throw new StorageManagerError('本地存储路径无效', 500)
+        const destination = localTargetFor(storageKey)
         fs.mkdirSync(path.dirname(destination), { recursive: true })
-        fs.renameSync(file.path, destination)
+        moveFileSync(file.path, destination)
         return { providerId: provider.id, storageKey }
       }
 
@@ -421,8 +518,8 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
     const storageKey = image.storage_key || `${image.owner_id}/${image.filename}`
 
     if (provider.type === 'local') {
-      const target = path.resolve(uploadsDir, storageKey)
-      if (target.startsWith(`${path.resolve(uploadsDir)}${path.sep}`) && fs.existsSync(target)) fs.unlinkSync(target)
+      const target = localTargetFor(storageKey)
+      if (fs.existsSync(target)) fs.unlinkSync(target)
       return
     }
     if (S3_TYPES.has(provider.type)) {
@@ -446,8 +543,8 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
     const rangeHeader = validRangeHeader(options.rangeHeader) ? String(options.rangeHeader).trim() : ''
 
     if (provider.type === 'local') {
-      const target = path.resolve(uploadsDir, storageKey)
-      if (!target.startsWith(`${path.resolve(uploadsDir)}${path.sep}`) || !fs.existsSync(target)) {
+      const target = localTargetFor(storageKey)
+      if (!fs.existsSync(target)) {
         throw new StorageManagerError('图片原文件不存在', 404)
       }
       const stat = fs.statSync(target)

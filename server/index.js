@@ -715,7 +715,7 @@ const persistUploadedFiles = async ({ files, user, album, request, guestUploaded
     uploadReservations.set(user.id, pendingSize + reservedBytes)
 
     for (const { file, metadata, processing } of processed) {
-      const location = await storageManager.storeFile(user.id, file, providerId)
+      const location = await storageManager.storeFile(user.id, file, providerId, 'image')
       stored.push({ file, location, metadata, processing })
     }
 
@@ -791,7 +791,7 @@ const persistUploadedVideos = async ({ files, user, request }) => {
     uploadReservations.set(user.id, pendingSize + reservedBytes)
 
     for (const file of files) {
-      const location = await storageManager.storeFile(user.id, file, providerId)
+      const location = await storageManager.storeFile(user.id, file, providerId, 'video')
       stored.push({ file, location })
     }
 
