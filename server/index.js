@@ -927,6 +927,7 @@ const streamManagedMedia = async (req, res, { table, filenameFor, missingMessage
     return res.status(404).json({ message: missingMessage })
   }
 
+  res.setHeader('Accept-Ranges', 'bytes')
   try {
     const object = await storageManager.openStoredObject(media, { rangeHeader: req.headers.range })
     let cleaned = false
@@ -978,6 +979,7 @@ const streamManagedMedia = async (req, res, { table, filenameFor, missingMessage
   } catch (error) {
     const status = error instanceof StorageManagerError ? error.status : 502
     if (status >= 500) console.error(`Failed to stream ${table.slice(0, -1)} ${media.id}`, error)
+    if (status === 416) res.setHeader('Content-Range', `bytes */${media.size}`)
     res.status(status).json({ message: status === 404 ? `${failureMessage}原文件不存在` : `${failureMessage}读取失败` })
   }
 }

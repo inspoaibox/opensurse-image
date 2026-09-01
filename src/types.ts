@@ -112,6 +112,8 @@ export interface VideoItem {
   extension?: string
   mimeType: string
   size: number
+  album: string
+  starred: boolean
   views: number
   links?: {
     direct: string

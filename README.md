@@ -441,7 +441,7 @@ server {
     listen [::]:80;
     server_name img.example.com;
 
-    client_max_body_size 420m;
+    client_max_body_size 5120m;
 
     location / {
         proxy_pass http://127.0.0.1:18765;
@@ -457,7 +457,7 @@ server {
 }
 ```
 
-`client_max_body_size 420m` 用于覆盖登录用户最多 20 张、每张 20 MB 的批量请求和 multipart 额外开销。可以根据实际需要降低，但不能低于业务允许的请求体大小。
+`client_max_body_size 5120m` 用于覆盖登录用户最多 20 张、每张 20 MB 的图片批量请求，以及最多 10 个、每个默认 500 MB 的视频批量请求和 multipart 额外开销。若通过 `PICNEST_VIDEO_MAX_MB` 提高视频上限，也必须同步提高 Nginx 的请求体上限；如果不需要批量上传大视频，可以按实际策略降低这两个值。
 
 ### 4. 配置 HTTPS
 
@@ -539,7 +539,7 @@ img.example.com {
     encode zstd gzip
 
     request_body {
-        max_size 420MB
+        max_size 5120MB
     }
 
     reverse_proxy 127.0.0.1:18765

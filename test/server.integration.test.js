@@ -234,6 +234,11 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.equal(videoRange.headers.get('content-length'), '4')
   assert.deepEqual(Buffer.from(await videoRange.arrayBuffer()), videoBytes.subarray(1, 5))
 
+  const invalidVideoRange = await fetch(video.url, { headers: { Range: `bytes=${videoBytes.length}-` } })
+  assert.equal(invalidVideoRange.status, 416)
+  assert.equal(invalidVideoRange.headers.get('accept-ranges'), 'bytes')
+  assert.equal(invalidVideoRange.headers.get('content-range'), `bytes */${videoBytes.length}`)
+
   const invalidVideoForm = new FormData()
   invalidVideoForm.append('files', new Blob([videoBytes], { type: 'video/mp4' }), 'not-a-video.txt')
   const invalidVideoUpload = await requestJson(`${baseUrl}/api/videos`, { method: 'POST', headers: { Cookie: memberCookie }, body: invalidVideoForm })

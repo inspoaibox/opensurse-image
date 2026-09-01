@@ -39,8 +39,8 @@ const parseRangeHeader = (value, totalLength) => {
     end = endPart ? Number(endPart) : totalLength - 1
   }
 
-  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start) return null
-  if (start >= totalLength) throw new StorageManagerError('请求的媒体范围无效', 416)
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0) return null
+  if (start >= totalLength || end < start) throw new StorageManagerError('请求的媒体范围无效', 416)
   return { start, end: Math.min(end, totalLength - 1) }
 }
 

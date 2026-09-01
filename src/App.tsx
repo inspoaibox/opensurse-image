@@ -579,7 +579,7 @@ function App() {
       case 'gallery':
         return <GalleryView images={images} albums={albums} selectedAlbum={galleryAlbum} onAlbumChange={setGalleryAlbum} loading={loading} onShare={setShareImage} onPatch={patchImage} onDelete={deleteImages} />
       case 'videos':
-        return <VideoLibrary videos={videos} extensions={videoExtensions} maxFileSize={videoMaxFileSize} uploading={uploading} progress={uploadProgress} onUpload={uploadVideos} onShare={setShareVideo} onPatch={patchVideo} onDelete={deleteVideos} notify={notify} />
+        return <VideoLibrary videos={videos} extensions={videoExtensions} maxFileSize={videoMaxFileSize} loading={loading} uploading={uploading} progress={uploadProgress} onUpload={uploadVideos} onShare={setShareVideo} onPatch={patchVideo} onDelete={deleteVideos} notify={notify} />
       case 'albums':
         return <AlbumsView albums={albums} images={images} onOpenGallery={openAlbum} onAlbumCreated={addAlbum} onSetDefault={setDefaultAlbum} notify={notify} />
       case 'users':
@@ -1078,10 +1078,11 @@ function GalleryView({ images, albums, selectedAlbum, onAlbumChange, loading, on
   )
 }
 
-function VideoLibrary({ videos, extensions, maxFileSize, uploading, progress, onUpload, onShare, onPatch, onDelete, notify }: {
+function VideoLibrary({ videos, extensions, maxFileSize, loading, uploading, progress, onUpload, onShare, onPatch, onDelete, notify }: {
   videos: VideoItem[]
   extensions: string[]
   maxFileSize: number
+  loading: boolean
   uploading: boolean
   progress: number
   onUpload: (files: File[]) => void
@@ -1136,7 +1137,7 @@ function VideoLibrary({ videos, extensions, maxFileSize, uploading, progress, on
         )}
       </div>
 
-      {filtered.length === 0 ? (
+      {loading ? <CardSkeletons /> : filtered.length === 0 ? (
         <div className="empty-state"><span><Video size={28} /></span><h3>{videos.length ? '没有找到视频' : '视频库还是空的'}</h3><p>{videos.length ? '试试调整关键词或格式筛选。' : '选择视频或拖曳文件到上方上传区，开始建立视频库。'}</p></div>
       ) : (
         <div className="video-grid">

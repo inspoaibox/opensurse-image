@@ -1,9 +1,9 @@
 img.example.com {
     encode zstd gzip
 
-    # Maximum authenticated batch: 20 files x 20 MB plus multipart overhead.
+    # Maximum authenticated batch: 10 files x 500 MB plus multipart overhead.
     request_body {
-        max_size 420MB
+        max_size 5120MB
     }
 
     # Must match PORT in /etc/picnest/picnest.env.

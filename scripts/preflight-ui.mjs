@@ -121,6 +121,11 @@ try {
   await page.getByText('EXIF 与原始元数据').waitFor()
   await page.getByRole('button', { name: '关闭大图查看' }).click()
 
+  await page.getByRole('button', { name: '视频库' }).click()
+  await page.getByRole('heading', { name: '视频库', exact: true }).waitFor()
+  await page.getByRole('button', { name: '选择视频' }).waitFor()
+  await page.getByText('视频库还是空的').waitFor()
+
   await page.getByRole('button', { name: '相册' }).click()
   await page.getByRole('heading', { name: '相册', exact: true }).waitFor()
   assert.equal(await page.getByText('默认相册').count() > 0, true)

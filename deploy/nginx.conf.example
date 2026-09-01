@@ -3,8 +3,8 @@ server {
     listen [::]:80;
     server_name img.example.com;
 
-    # Maximum authenticated batch: 20 files x 20 MB plus multipart overhead.
-    client_max_body_size 420m;
+    # Maximum authenticated batch: 10 files x 500 MB plus multipart overhead.
+    client_max_body_size 5120m;
 
     location / {
         # Must match PORT in /etc/picnest/picnest.env.
