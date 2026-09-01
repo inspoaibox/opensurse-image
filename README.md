@@ -1,6 +1,6 @@
 # PicNest 图屿
 
-PicNest 是一个自托管、多用户的图片和视频托管与资产管理系统。它支持粘贴、拖曳和批量选择上传，提供图库、视频库、相册、分享链接、用户权限、独立配额、API 密钥，以及可由管理员控制的游客上传。
+PicNest 是一个自托管、多用户的图片和视频托管与资产管理系统。它支持粘贴、拖曳和批量选择上传，也支持由服务器端从 HTTP/HTTPS 地址远程导入媒体；提供图库、视频库、相册、分享链接、用户权限、独立配额、API 密钥，以及可由管理员控制的游客上传。
 
 图片和视频可以保存在本机磁盘、腾讯云 COS、阿里云 OSS、华为云 OBS、WebDAV 或其他 S3 兼容对象存储中；账户、媒体索引和加密后的存储配置保存在 SQLite。系统适合个人、工作室和小团队在自己的服务器上部署。
 
@@ -11,6 +11,7 @@ PicNest 是一个自托管、多用户的图片和视频托管与资产管理系
 - [运行要求](#运行要求)
 - [本地开发](#本地开发)
 - [Linux 生产部署](#linux-生产部署)
+- [远程导入](#远程导入)
 - [环境变量](#环境变量)
 - [存储服务](#存储服务)
 - [Nginx 反向代理](#nginx-反向代理)
@@ -29,6 +30,7 @@ PicNest 是一个自托管、多用户的图片和视频托管与资产管理系
 
 - 粘贴、拖曳、单选和批量选择上传
 - 视频库支持 MP4、WebM、MOV、M4V、AVI、MKV 上传、在线播放、Range 断点播放和分享
+- 媒体库支持图片和视频重命名，重命名后会同步更新公开文件名与引用地址
 - 工作台可选择目标相册，未选择时自动进入用户设置的默认相册
 - 登录用户单张最大 20 MB，单次最多 20 张
 - 登录用户单个视频默认最大 500 MB，单次最多 10 个；视频与图片共用用户存储配额
@@ -36,6 +38,7 @@ PicNest 是一个自托管、多用户的图片和视频托管与资产管理系
 - 用户级图片、相册、配额、存储策略和 API 密钥隔离，支持为不同客户端创建多把独立密钥
 - 管理员可编辑成员资料、角色、密码、存储配额和目标存储服务
 - API 密钥调用按月统计次数、成功率、响应耗时和流量
+- 统计分析按天记录媒体直链实际流量、外部引用域名、Range 请求和高消耗媒体
 - 首位用户自动成为管理员，后续账户由管理员创建
 - 网格/列表图库、关键词、相册和格式筛选
 - 直链、Markdown、HTML、BBCode 一键复制
@@ -96,7 +99,7 @@ Ubuntu/Debian 可先安装部署工具，再使用 NodeSource 安装 Node.js 22�
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y curl ca-certificates openssl git build-essential python3 rsync
+sudo apt-get install -y curl aria2 ca-certificates openssl git build-essential python3 rsync
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt-get install -y nodejs
 node --version
@@ -140,7 +143,7 @@ npm run dev
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y curl ca-certificates openssl git build-essential python3 rsync
+sudo apt-get install -y curl aria2 ca-certificates openssl git build-essential python3 rsync
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt-get install -y nodejs
 node --version
@@ -291,6 +294,9 @@ PM2 模板默认使用 `/usr/bin/node`。如果 `command -v node` 返回其他�
 | `PICNEST_SESSION_SECRET` | 开发环境自动生成 | JWT 会话签名密钥；`NODE_ENV=production` 时必须显式配置至少 32 个字符并备份 |
 | `PICNEST_STORAGE_SECRET` | 开发环境使用会话密钥 | 云存储、WebDAV 凭据和可查看 API 密钥的加密密钥；生产环境必须独立配置至少 32 个字符，投入使用后不可更换 |
 | `PICNEST_VIDEO_MAX_MB` | `500` | 登录用户单个视频的大小上限，单位 MB；单次最多上传 10 个 |
+| `PICNEST_REMOTE_DOWNLOADER` | `auto` | 远程导入下载器：优先 `aria2c`，其次 `curl`，最后使用 Node 流式下载；也可显式指定 `aria2c`、`curl` 或 `node` |
+| `PICNEST_REMOTE_MAX_ACTIVE` | `2` | 单个用户同时运行的远程导入任务数，最大支持配置为 8 |
+| `PICNEST_ANALYTICS_TIMEZONE` | `Asia/Shanghai` | 每日流量统计使用的 IANA 时区，例如 `Asia/Shanghai`、`Asia/Singapore` 或 `UTC` |
 | `PICNEST_API_MONTHLY_LIMIT` | `50000` | 每位用户的月度 API 密钥调用额度，达到上限后返回 `429` |
 | `PICNEST_PUBLIC_URL` | 开发环境根据请求识别 | 对外访问根地址，例如 `https://img.example.com`；生产环境必须配置有效的 HTTPS 地址 |
 | `COOKIE_SECURE` | `false` | `NODE_ENV=production` 时必须设为 `true`；纯 HTTP 本地测试保持 `false` |
@@ -307,6 +313,31 @@ PM2 模板默认使用 `/usr/bin/node`。如果 `command -v node` 返回其他�
 ```bash
 PORT=18765 COOKIE_SECURE=false npm start
 ```
+
+## 远程导入
+
+工作台的“远程导入”不会让文件先下载到操作人员的电脑，而是由 PicNest 服务器直接连接 HTTP/HTTPS 地址并写入当前存储。输入框支持直接粘贴一个地址，也支持从 `curl` 或 `wget` 命令中提取一个地址；命令本身不会交给 shell 执行，命令参数和请求头不会被执行或转发。
+
+Linux 服务器会按以下顺序选择下载方式：
+
+1. `aria2c`：优先用于 HTTP/HTTPS 分段多连接下载，连接数由工作台选择。
+2. `curl`：服务器没有 `aria2c` 时自动回退，保证普通远程下载仍可用。
+3. Node 内置流式下载：两个命令都不存在时使用，无需额外安装依赖。
+
+Ubuntu/Debian 建议安装 `aria2c` 和 `curl`：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y aria2 curl
+```
+
+远程导入只允许 HTTP/HTTPS，默认拒绝本机、局域网和其他私有地址，限制单任务最大大小为当前视频大小上限与 20 MB 图片上限中的较大值。下载完成后，服务端会根据实际图片格式或远程文件扩展名/MIME 类型自动进入图片相册或视频分类。任务页面关闭后，服务器端任务仍会继续运行；重新打开页面时，媒体列表可通过刷新看到已入库结果。
+
+## 统计分析
+
+登录后的“统计分析”会按当前用户展示最近 7、30、90、180 或 365 天的媒体直链流量。服务端会在图片或视频实际响应数据时记录返回字节、请求次数、Range 请求，以及请求来源类型：带其他域名 Referer 的请求计为外部引用，没有 Referer 的请求计为直接访问，当前站点 Referer 计为站内访问。外部引用只保存来源域名，不保存完整页面地址或客户端 IP。
+
+统计数据从功能部署后开始累计；浏览器或 CDN 命中缓存而没有到达 PicNest 的请求不会被服务器统计。页面中的峰值提示是基于统计期间外部流量日均值的辅助判断，不能替代 CDN、Nginx 或云厂商账单数据。
 
 PowerShell：
 
@@ -1038,7 +1069,7 @@ curl -X POST https://img.example.com/api/videos \
 
 视频上传始终返回视频对象数组，即使只上传一个文件；单次最多 10 个，单个大小上限由 `PICNEST_VIDEO_MAX_MB` 控制，默认 500 MB。`GET /api/videos` 返回列表，`GET /api/videos/:id` 返回单个对象，`PATCH /api/videos/:id` 支持修改 `name`、`category` 和 `starred`，`POST /api/videos/bulk-delete` 支持按 ID 数组批量删除。分类通过 `GET/POST /api/video-categories` 管理，并可用 `PATCH /api/video-categories/:id/default` 设置默认分类。
 
-媒体库将图片相册与视频分类分开管理。视频通过独立接口保存，视频与图片共用用户配额和存储服务。支持 `mp4`、`webm`、`mov`、`m4v`、`avi`、`mkv`，服务端按原始字节保存，不经过 Sharp 图片处理。视频可以在媒体库的“视频”页按分类筛选、上传、播放、分享、收藏和删除；分类支持创建、设置默认分类，以及在视频详情中重新归类。视频直链公开可读取，响应支持 `Accept-Ranges: bytes`；浏览器可以使用 `Range` 请求进行按需加载、进度拖动和断点播放。视频对象同样返回 `filename`、`url`、`path`、`type`、`format`、`extension`、`mimeType`、`size`、`category`、`links` 和 `createdAt`，并提供 HTML5 `<video>` 引用。旧客户端使用的 `album` 字段继续作为兼容别名。
+媒体库将图片相册与视频分类分开管理。视频通过独立接口保存，视频与图片共用用户配额和存储服务。支持 `mp4`、`webm`、`mov`、`m4v`、`avi`、`mkv`，服务端按原始字节保存，不经过 Sharp 图片处理。图片和视频都可以在详情弹窗中重命名，系统会保持真实格式扩展名并同步更新公开文件名和引用地址。视频可以在媒体库的“视频”页按分类筛选、上传、播放、分享、收藏和删除；分类支持创建、设置默认分类，以及在视频详情中重新归类。视频直链公开可读取，响应支持 `Accept-Ranges: bytes`；浏览器可以使用 `Range` 请求进行按需加载、进度拖动和断点播放。视频对象同样返回 `filename`、`url`、`path`、`type`、`format`、`extension`、`mimeType`、`size`、`category`、`links` 和 `createdAt`，并提供 HTML5 `<video>` 引用。旧客户端使用的 `album` 字段继续作为兼容别名。
 
 系统图片处理默认开启、默认保持原格式。管理员可在“系统设置 → 图片处理”中设置输出为 JPEG、PNG、WebP 或 AVIF，调整 1–100 的转换质量，并配置 EXIF 自动旋转和元数据清理。
 
@@ -1072,6 +1103,8 @@ API 上传可使用 multipart 字段 `format`、`quality`、`autoOrient`、`stri
 | `GET` | `/api/videos/:id` | 视频所有者 | 读取单个视频的完整对象与引用地址 |
 | `PATCH/DELETE` | `/api/videos/:id` | 视频所有者 | 修改名称、分类或收藏状态、删除视频 |
 | `POST` | `/api/videos/bulk-delete` | 视频所有者 | 批量删除视频 |
+| `POST` | `/api/remote-imports` | 用户会话 | 创建服务器端远程导入任务 |
+| `GET` | `/api/remote-imports/:id` | 创建者会话 | 查询远程导入任务进度和结果 |
 | `GET/POST` | `/api/video-categories` | 用户/API 密钥 | 视频分类列表或创建 |
 | `PATCH` | `/api/video-categories/:id/default` | 分类所有者 | 设置默认上传视频分类 |
 | `GET/POST` | `/api/albums` | 用户/API 密钥 | 相册列表或创建 |
@@ -1088,6 +1121,7 @@ API 上传可使用 multipart 字段 `format`、`quality`、`autoOrient`、`stri
 | `POST` | `/api/storage/providers/:id/test` | 管理员会话 | 检测存储写入、读取和删除能力 |
 | `PATCH` | `/api/storage/providers/:id/default` | 管理员会话 | 检测并切换当前存储 |
 | `GET` | `/api/stats` | 用户/API 密钥 | 当前用户空间统计 |
+| `GET` | `/api/analytics/traffic?days=30` | 当前用户会话 | 查询每日媒体引用/分享流量、来源域名和高消耗媒体 |
 
 公开图片由 `GET /media/:id/:filename.ext` 返回，视频由 `GET /media/video/:id/:filename.ext` 返回；两者都包含实际 `Content-Type`、UTF-8 文件名、缓存头和 ETag。视频媒体地址额外支持 `Range` 请求并返回 `206 Partial Content`，旧的无文件名地址继续兼容。完整交互式文档可在登录后的“开发者 → 阅读 API 文档”中查看。
 

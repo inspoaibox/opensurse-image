@@ -6,6 +6,7 @@ import { rateLimit } from 'express-rate-limit'
 import helmet from 'helmet'
 import jwt from 'jsonwebtoken'
 import multer from 'multer'
+import sharp from 'sharp'
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
@@ -18,6 +19,7 @@ import {
   processUploadedImage,
   validateUploadFilename,
 } from './image-processing.js'
+import { downloadRemoteFile, parseRemoteSource, RemoteDownloadError, remoteDownloadDefaults } from './remote-download.js'
 import { createStorageManager, StorageManagerError } from './storage.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -32,11 +34,22 @@ const configuredVideoMaxMb = Number(process.env.PICNEST_VIDEO_MAX_MB || 500)
 const videoMaxBytes = Number.isFinite(configuredVideoMaxMb) && configuredVideoMaxMb > 0
   ? Math.floor(configuredVideoMaxMb * 1024 * 1024)
   : 500 * 1024 * 1024
+const remoteMaxBytes = Math.max(20 * 1024 * 1024, videoMaxBytes)
+const configuredRemoteMaxActive = Number(process.env.PICNEST_REMOTE_MAX_ACTIVE || 2)
+const remoteMaxActive = Number.isInteger(configuredRemoteMaxActive) && configuredRemoteMaxActive > 0
+  ? Math.min(configuredRemoteMaxActive, 8)
+  : 2
 const configuredApiMonthlyLimit = Number(process.env.PICNEST_API_MONTHLY_LIMIT || 50000)
 const apiMonthlyLimit = Number.isFinite(configuredApiMonthlyLimit) && configuredApiMonthlyLimit > 0
   ? Math.floor(configuredApiMonthlyLimit)
   : 50000
 const configuredPublicUrl = String(process.env.PICNEST_PUBLIC_URL || '').trim().replace(/\/+$/, '')
+const analyticsTimeZone = String(process.env.PICNEST_ANALYTICS_TIMEZONE || 'Asia/Shanghai').trim() || 'Asia/Shanghai'
+try {
+  new Intl.DateTimeFormat('en-US', { timeZone: analyticsTimeZone }).format()
+} catch {
+  throw new Error('PICNEST_ANALYTICS_TIMEZONE 必须是有效的 IANA 时区')
+}
 
 const validateProductionEnvironment = () => {
   if (!isProduction) return
@@ -177,6 +190,40 @@ db.exec(`
     traffic_bytes INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, month)
   );
+
+  CREATE TABLE IF NOT EXISTS media_traffic_daily (
+    owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video')),
+    media_id TEXT NOT NULL,
+    traffic_date TEXT NOT NULL,
+    requests INTEGER NOT NULL DEFAULT 0,
+    bytes INTEGER NOT NULL DEFAULT 0,
+    external_requests INTEGER NOT NULL DEFAULT 0,
+    external_bytes INTEGER NOT NULL DEFAULT 0,
+    direct_requests INTEGER NOT NULL DEFAULT 0,
+    direct_bytes INTEGER NOT NULL DEFAULT 0,
+    internal_requests INTEGER NOT NULL DEFAULT 0,
+    internal_bytes INTEGER NOT NULL DEFAULT 0,
+    range_requests INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (owner_id, media_type, media_id, traffic_date)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_media_traffic_owner_date
+    ON media_traffic_daily(owner_id, traffic_date DESC);
+
+  CREATE TABLE IF NOT EXISTS media_referrer_daily (
+    owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video')),
+    media_id TEXT NOT NULL,
+    traffic_date TEXT NOT NULL,
+    referrer_host TEXT NOT NULL,
+    requests INTEGER NOT NULL DEFAULT 0,
+    bytes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (owner_id, media_type, media_id, traffic_date, referrer_host)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_media_referrer_owner_date
+    ON media_referrer_daily(owner_id, traffic_date DESC);
 
   CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
@@ -339,6 +386,102 @@ const absolutePublicUrl = (url, req) => {
   if (!url || /^[a-z][a-z\d+.-]*:\/\//i.test(url)) return url
   const origin = requestOrigin(req)
   return origin ? new URL(url, `${origin}/`).href : url
+}
+const analyticsDateKey = (value = new Date()) => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: analyticsTimeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(value)
+  const values = Object.fromEntries(parts.filter(({ type }) => type !== 'literal').map(({ type, value: partValue }) => [type, partValue]))
+  return `${values.year}-${values.month}-${values.day}`
+}
+const shiftAnalyticsDate = (dateKey, offset) => {
+  const date = new Date(`${dateKey}T12:00:00.000Z`)
+  date.setUTCDate(date.getUTCDate() + offset)
+  return date.toISOString().slice(0, 10)
+}
+const analyticsDateRange = (days) => {
+  const today = analyticsDateKey()
+  return { start: shiftAnalyticsDate(today, -(days - 1)), end: today }
+}
+const classifyMediaRequest = (req) => {
+  const referer = String(req.get('referer') || '').trim()
+  const fetchSite = String(req.get('sec-fetch-site') || '').trim().toLowerCase()
+  if (referer) {
+    try {
+      const parsed = new URL(referer)
+      if (['http:', 'https:'].includes(parsed.protocol)) {
+        const parsedHost = parsed.host.toLowerCase().slice(0, 255)
+        try {
+          const ownHost = new URL(requestOrigin(req)).host.toLowerCase()
+          if (ownHost && parsed.host.toLowerCase() === ownHost) return { sourceType: 'internal', referrerHost: '' }
+        } catch {
+          // Fall through and treat an unknown origin as an external referrer.
+        }
+        return { sourceType: 'external', referrerHost: parsedHost }
+      }
+    } catch {
+      // A malformed Referer is not used as a stored hostname.
+    }
+  }
+  if (fetchSite === 'cross-site') return { sourceType: 'external', referrerHost: '(跨站未知来源)' }
+  return { sourceType: 'direct', referrerHost: '' }
+}
+const upsertMediaTraffic = db.prepare(`
+  INSERT INTO media_traffic_daily (
+    owner_id, media_type, media_id, traffic_date, requests, bytes,
+    external_requests, external_bytes, direct_requests, direct_bytes,
+    internal_requests, internal_bytes, range_requests
+  ) VALUES (
+    @ownerId, @mediaType, @mediaId, @trafficDate, 1, @bytes,
+    @externalRequests, @externalBytes, @directRequests, @directBytes,
+    @internalRequests, @internalBytes, @rangeRequests
+  )
+  ON CONFLICT(owner_id, media_type, media_id, traffic_date) DO UPDATE SET
+    requests = requests + excluded.requests,
+    bytes = bytes + excluded.bytes,
+    external_requests = external_requests + excluded.external_requests,
+    external_bytes = external_bytes + excluded.external_bytes,
+    direct_requests = direct_requests + excluded.direct_requests,
+    direct_bytes = direct_bytes + excluded.direct_bytes,
+    internal_requests = internal_requests + excluded.internal_requests,
+    internal_bytes = internal_bytes + excluded.internal_bytes,
+    range_requests = range_requests + excluded.range_requests
+`)
+const upsertMediaReferrer = db.prepare(`
+  INSERT INTO media_referrer_daily (
+    owner_id, media_type, media_id, traffic_date, referrer_host, requests, bytes
+  ) VALUES (@ownerId, @mediaType, @mediaId, @trafficDate, @referrerHost, 1, @bytes)
+  ON CONFLICT(owner_id, media_type, media_id, traffic_date, referrer_host) DO UPDATE SET
+    requests = requests + excluded.requests,
+    bytes = bytes + excluded.bytes
+`)
+const recordMediaTraffic = ({ media, mediaType, req, bytes }) => {
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) return
+  const { sourceType, referrerHost } = classifyMediaRequest(req)
+  const trafficDate = analyticsDateKey()
+  const values = {
+    ownerId: media.owner_id,
+    mediaType,
+    mediaId: media.id,
+    trafficDate,
+    bytes,
+    externalRequests: sourceType === 'external' ? 1 : 0,
+    externalBytes: sourceType === 'external' ? bytes : 0,
+    directRequests: sourceType === 'direct' ? 1 : 0,
+    directBytes: sourceType === 'direct' ? bytes : 0,
+    internalRequests: sourceType === 'internal' ? 1 : 0,
+    internalBytes: sourceType === 'internal' ? bytes : 0,
+    rangeRequests: req.headers.range ? 1 : 0,
+  }
+  try {
+    upsertMediaTraffic.run(values)
+    if (sourceType === 'external' && referrerHost) upsertMediaReferrer.run({ ...values, referrerHost })
+  } catch (error) {
+    console.error(`Failed to record media traffic for ${mediaType} ${media.id}`, error)
+  }
 }
 const escapeReferenceText = (value) => String(value).replaceAll('\\', '\\\\').replaceAll('[', '\\[').replaceAll(']', '\\]')
 const escapeReferenceAttribute = (value) => String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -901,6 +1044,183 @@ const persistUploadedVideos = async ({ files, user, request, category }) => {
   }
 }
 
+const remoteImportTasks = new Map()
+const activeRemoteTask = (task) => ['queued', 'downloading', 'detecting', 'storing'].includes(task.status)
+const remoteSourceLabel = (url) => {
+  try {
+    const parsed = new URL(url)
+    return `${parsed.host}${parsed.pathname === '/' ? '' : parsed.pathname}`
+  } catch {
+    return '远程文件'
+  }
+}
+
+const publicRemoteTask = (task) => ({
+  id: task.id,
+  status: task.status,
+  phase: task.phase,
+  sourceLabel: task.sourceLabel,
+  filename: task.filename,
+  mediaType: task.mediaType,
+  progress: task.progress,
+  downloadedBytes: task.downloadedBytes,
+  totalBytes: task.totalBytes,
+  speed: task.speed,
+  eta: task.eta,
+  downloader: task.downloader,
+  connections: task.connections,
+  result: task.result,
+  error: task.error,
+  createdAt: task.createdAt,
+  updatedAt: task.updatedAt,
+})
+
+const updateRemoteTask = (task, changes) => {
+  Object.assign(task, changes, { updatedAt: new Date().toISOString() })
+}
+
+const remoteExtensionForMime = (mimeType, mediaTypes) => {
+  const normalized = String(mimeType || '').toLowerCase().split(';', 1)[0]
+  const table = mediaTypes === 'image' ? mimeTypesByFormat : videoMimeTypesByFormat
+  return Object.entries(table).find(([, mime]) => mime === normalized)?.[0] || ''
+}
+
+const prepareRemoteFile = async ({ filePath, filename, contentType, taskId }) => {
+  const imageMetadata = await sharp(filePath, { animated: true, failOn: 'none' }).metadata().catch(() => null)
+
+  const detectedImageFormat = imageMetadata?.format ? normalizeImageFormat(imageMetadata.format) : ''
+  const imageSettings = getImageProcessingSettings()
+  if (detectedImageFormat && !imageSettings.allowedExtensions.includes(detectedImageFormat)) {
+    throw new ImageProcessingError(`远程图片格式 .${detectedImageFormat} 未在当前允许列表中`, 400)
+  }
+  const imageExtension = detectedImageFormat || ''
+  const sourceExtension = path.extname(filename).slice(1).toLowerCase()
+  const videoExtension = allowedVideoExtensions.includes(sourceExtension)
+    ? sourceExtension
+    : remoteExtensionForMime(contentType, 'video')
+  const extension = imageExtension || videoExtension
+  const mediaType = imageExtension ? 'image' : videoExtension ? 'video' : ''
+  if (!mediaType || !extension) {
+    throw new ImageProcessingError(`无法识别远程文件格式，仅支持图片（${imageSettings.allowedExtensions.join('、').toUpperCase()}）或视频（${allowedVideoExtensions.join('、').toUpperCase()}）`, 400)
+  }
+
+  const normalizedFilename = normalizeUploadFilename(filename)
+  const currentExtension = path.extname(normalizedFilename)
+  const stem = path.basename(normalizedFilename, currentExtension) || `remote-${taskId.slice(0, 8)}`
+  const originalname = `${stem}.${extension}`
+  const storedStem = stem.replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]/g, '-').slice(0, 48) || 'remote'
+  const storedFilename = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${storedStem}.${extension}`
+  const mimetype = mediaType === 'image'
+    ? mimeTypesByFormat[extension] || contentType || 'application/octet-stream'
+    : videoMimeTypesByFormat[extension] || contentType || 'application/octet-stream'
+  const stat = fs.statSync(filePath)
+  return {
+    fieldname: 'files',
+    originalname,
+    encoding: '7bit',
+    mimetype,
+    destination: uploadTempDir,
+    filename: storedFilename,
+    path: filePath,
+    size: stat.size,
+    mediaType,
+  }
+}
+
+const runRemoteImport = async (task) => {
+  const filePath = path.join(uploadTempDir, `remote-${task.id}.part`)
+  let lastLoaded = 0
+  let lastProgressAt = performance.now()
+  let smoothedSpeed = 0
+  try {
+    updateRemoteTask(task, { status: 'downloading', phase: 'downloading' })
+    const downloaded = await downloadRemoteFile({
+      input: task.url,
+      destination: filePath,
+      connections: task.connections,
+      maxBytes: remoteMaxBytes,
+      onMetadata: (metadata) => {
+        updateRemoteTask(task, {
+          filename: metadata.filename,
+          totalBytes: metadata.contentLength,
+          downloader: null,
+        })
+      },
+      onProgress: (loaded, total) => {
+        const now = performance.now()
+        const deltaBytes = loaded - lastLoaded
+        const deltaMs = now - lastProgressAt
+        if (deltaBytes > 0) {
+          const instantSpeed = deltaBytes / Math.max(1, deltaMs) * 1000
+          smoothedSpeed = smoothedSpeed ? smoothedSpeed * 0.7 + instantSpeed * 0.3 : instantSpeed
+          lastLoaded = loaded
+          lastProgressAt = now
+        }
+        const actualTotal = total || task.totalBytes || loaded
+        updateRemoteTask(task, {
+          downloadedBytes: loaded,
+          totalBytes: actualTotal,
+          progress: actualTotal > 0 ? Math.min(100, Math.round((loaded / actualTotal) * 100)) : 0,
+          speed: smoothedSpeed,
+          eta: smoothedSpeed > 0 && actualTotal > loaded ? (actualTotal - loaded) / smoothedSpeed : null,
+        })
+      },
+    })
+    updateRemoteTask(task, {
+      status: 'processing',
+      phase: 'detecting',
+      downloadedBytes: downloaded.size,
+      totalBytes: downloaded.size,
+      progress: 100,
+      speed: 0,
+      eta: null,
+      downloader: downloaded.downloader,
+      connections: downloaded.connections,
+    })
+    const file = await prepareRemoteFile({
+      filePath,
+      filename: downloaded.filename,
+      contentType: downloaded.contentType,
+      taskId: task.id,
+    })
+    if (file.mediaType === 'image' && file.size > 20 * 1024 * 1024) {
+      throw new ImageProcessingError('远程图片不能超过 20 MB', 413)
+    }
+    updateRemoteTask(task, { phase: 'storing', filename: file.originalname, mediaType: file.mediaType })
+    const created = file.mediaType === 'image'
+      ? await persistUploadedFiles({
+          files: [file],
+          user: task.user,
+          album: task.album,
+          request: task.request,
+          processingSettings: getImageProcessingSettings(),
+        })
+      : await persistUploadedVideos({
+          files: [file],
+          user: task.user,
+          request: task.request,
+          category: task.category,
+        })
+    updateRemoteTask(task, {
+      status: 'completed',
+      phase: 'completed',
+      progress: 100,
+      downloadedBytes: downloaded.size,
+      totalBytes: downloaded.size,
+      speed: 0,
+      eta: null,
+      result: created[0] || null,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '远程导入失败，请重试'
+    updateRemoteTask(task, { status: 'failed', phase: 'failed', error: message, eta: null })
+  } finally {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+    const expiry = setTimeout(() => remoteImportTasks.delete(task.id), 60 * 60 * 1000)
+    expiry.unref?.()
+  }
+}
+
 const allowGuestUpload = (req, res, next) => {
   const enabled = db.prepare('SELECT value FROM app_settings WHERE key = ?').get('guest_upload_enabled')?.value === 'true'
   if (!enabled) return res.status(403).json({ message: '游客上传当前未开放' })
@@ -1022,10 +1342,28 @@ const streamManagedMedia = async (req, res, { table, filenameFor, missingMessage
 
     db.prepare(`UPDATE ${table} SET views = views + 1 WHERE id = ?`).run(media.id)
 
+    let streamedBytes = 0
+    let trafficRecorded = false
+    const recordTraffic = () => {
+      if (trafficRecorded) return
+      trafficRecorded = true
+      recordMediaTraffic({
+        media,
+        mediaType: table === 'videos' ? 'video' : 'image',
+        req,
+        bytes: streamedBytes,
+      })
+    }
+    object.body.on('data', (chunk) => {
+      streamedBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk))
+    })
+    res.once('finish', recordTraffic)
+    res.once('close', recordTraffic)
     res.once('finish', cleanup)
     res.once('close', cleanup)
     object.body.once('error', (error) => {
       cleanup()
+      recordTraffic()
       if (res.headersSent) res.destroy(error)
       else res.status(502).json({ message: '图片读取失败' })
     })
@@ -1348,6 +1686,66 @@ app.post('/api/videos', authenticate, videoUpload.array('files', 10), async (req
   res.status(201).json(created)
 })
 
+app.post('/api/remote-imports', authenticate, requireSessionAuth, (req, res) => {
+  const activeCount = Array.from(remoteImportTasks.values())
+    .filter((task) => task.ownerId === req.user.id && activeRemoteTask(task)).length
+  if (activeCount >= remoteMaxActive) {
+    return res.status(429).json({ message: `同时最多进行 ${remoteMaxActive} 个远程导入任务` })
+  }
+
+  let parsed
+  try {
+    parsed = parseRemoteSource(String(req.body.source || req.body.url || ''))
+  } catch (error) {
+    if (error instanceof RemoteDownloadError) return res.status(error.status).json({ message: error.message })
+    throw error
+  }
+
+  const requestedAlbum = String(req.body.album || '').trim()
+  const requestedCategory = String(req.body.category || '').trim()
+  if (requestedAlbum && !validAlbumName(requestedAlbum)) return res.status(400).json({ message: '相册名称需要 1 到 100 个字符' })
+  if (requestedCategory && !validAlbumName(requestedCategory)) return res.status(400).json({ message: '视频分类名称需要 1 到 100 个字符' })
+  const connections = Number(req.body.connections || remoteDownloadDefaults.defaultConnections)
+  if (!Number.isInteger(connections) || connections < 1 || connections > remoteDownloadDefaults.maxConnections) {
+    return res.status(400).json({ message: `下载连接数需要是 1 到 ${remoteDownloadDefaults.maxConnections} 的整数` })
+  }
+
+  const task = {
+    id: crypto.randomUUID(),
+    ownerId: req.user.id,
+    user: req.user,
+    request: req,
+    url: parsed.url,
+    sourceLabel: remoteSourceLabel(parsed.url),
+    album: requestedAlbum || ensureDefaultAlbum(req.user.id),
+    category: requestedCategory || ensureDefaultVideoCategory(req.user.id),
+    connections,
+    status: 'queued',
+    phase: 'queued',
+    filename: '',
+    mediaType: '',
+    progress: 0,
+    downloadedBytes: 0,
+    totalBytes: null,
+    speed: 0,
+    eta: null,
+    downloader: null,
+    result: null,
+    error: '',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+  remoteImportTasks.set(task.id, task)
+  void runRemoteImport(task)
+  res.status(202).json(publicRemoteTask(task))
+})
+
+app.get('/api/remote-imports/:id', authenticate, requireSessionAuth, (req, res) => {
+  const task = remoteImportTasks.get(req.params.id)
+  if (!task || task.ownerId !== req.user.id) return res.status(404).json({ message: '远程导入任务不存在' })
+  res.json(publicRemoteTask(task))
+})
+
 app.patch('/api/videos/:id', authenticate, (req, res) => {
   const video = db.prepare('SELECT * FROM videos WHERE id = ? AND owner_id = ?').get(req.params.id, req.user.id)
   if (!video) return res.status(404).json({ message: '视频不存在' })
@@ -1583,6 +1981,149 @@ app.get('/api/stats', authenticate, (req, res) => {
     apiLimit: apiMonthlyLimit,
     apiSuccessRate: calls ? (Number(usage.success_calls) / calls) * 100 : 0,
     apiAverageResponseMs: calls ? Math.round(Number(usage.response_ms_total) / calls) : 0,
+  })
+})
+
+app.get('/api/analytics/traffic', authenticate, requireSessionAuth, (req, res) => {
+  const requestedDays = Number(req.query.days || 30)
+  if (!Number.isInteger(requestedDays) || requestedDays < 1 || requestedDays > 365) {
+    return res.status(400).json({ message: '统计范围需要是 1 到 365 天的整数' })
+  }
+  const { start, end } = analyticsDateRange(requestedDays)
+  const dailyRows = db.prepare(`
+    SELECT
+      traffic_date AS date,
+      SUM(requests) AS requests,
+      SUM(bytes) AS bytes,
+      SUM(external_requests) AS external_requests,
+      SUM(external_bytes) AS external_bytes,
+      SUM(direct_requests) AS direct_requests,
+      SUM(direct_bytes) AS direct_bytes,
+      SUM(internal_requests) AS internal_requests,
+      SUM(internal_bytes) AS internal_bytes,
+      SUM(range_requests) AS range_requests
+    FROM media_traffic_daily
+    WHERE owner_id = ? AND traffic_date BETWEEN ? AND ?
+    GROUP BY traffic_date
+    ORDER BY traffic_date ASC
+  `).all(req.user.id, start, end)
+  const dailyByDate = new Map(dailyRows.map((row) => [row.date, row]))
+  const daily = Array.from({ length: requestedDays }, (_unused, index) => {
+    const date = shiftAnalyticsDate(start, index)
+    return dailyByDate.get(date) || {
+      date,
+      requests: 0,
+      bytes: 0,
+      external_requests: 0,
+      external_bytes: 0,
+      direct_requests: 0,
+      direct_bytes: 0,
+      internal_requests: 0,
+      internal_bytes: 0,
+      range_requests: 0,
+    }
+  })
+  const topMedia = db.prepare(`
+    SELECT
+      traffic.media_type AS media_type,
+      traffic.media_id AS media_id,
+      COALESCE(images.name, videos.name, '已删除媒体') AS name,
+      COALESCE(images.filename, videos.filename, '') AS filename,
+      SUM(traffic.requests) AS requests,
+      SUM(traffic.bytes) AS bytes,
+      SUM(traffic.external_requests) AS external_requests,
+      SUM(traffic.external_bytes) AS external_bytes,
+      SUM(traffic.range_requests) AS range_requests
+    FROM media_traffic_daily AS traffic
+    LEFT JOIN images ON traffic.media_type = 'image' AND images.id = traffic.media_id
+    LEFT JOIN videos ON traffic.media_type = 'video' AND videos.id = traffic.media_id
+    WHERE traffic.owner_id = ? AND traffic.traffic_date BETWEEN ? AND ?
+    GROUP BY traffic.media_type, traffic.media_id
+    ORDER BY bytes DESC, external_bytes DESC
+    LIMIT 12
+  `).all(req.user.id, start, end)
+  const referrers = db.prepare(`
+    SELECT
+      referrer_host AS host,
+      SUM(requests) AS requests,
+      SUM(bytes) AS bytes,
+      COUNT(DISTINCT media_id) AS media_count
+    FROM media_referrer_daily
+    WHERE owner_id = ? AND traffic_date BETWEEN ? AND ?
+    GROUP BY referrer_host
+    ORDER BY bytes DESC, requests DESC
+    LIMIT 12
+  `).all(req.user.id, start, end)
+  const summary = daily.reduce((result, row) => ({
+    requests: result.requests + Number(row.requests),
+    bytes: result.bytes + Number(row.bytes),
+    externalRequests: result.externalRequests + Number(row.external_requests),
+    externalBytes: result.externalBytes + Number(row.external_bytes),
+    directRequests: result.directRequests + Number(row.direct_requests),
+    directBytes: result.directBytes + Number(row.direct_bytes),
+    internalRequests: result.internalRequests + Number(row.internal_requests),
+    internalBytes: result.internalBytes + Number(row.internal_bytes),
+    rangeRequests: result.rangeRequests + Number(row.range_requests),
+  }), {
+    requests: 0,
+    bytes: 0,
+    externalRequests: 0,
+    externalBytes: 0,
+    directRequests: 0,
+    directBytes: 0,
+    internalRequests: 0,
+    internalBytes: 0,
+    rangeRequests: 0,
+  })
+  const peakDay = daily.reduce((peak, row) => Number(row.bytes) > Number(peak?.bytes || 0) ? row : peak, null)
+  const peakExternalDay = daily.reduce((peak, row) => Number(row.external_bytes) > Number(peak?.external_bytes || 0) ? row : peak, null)
+  const activeDays = daily.filter((row) => Number(row.bytes) > 0).length
+  const externalActiveDays = daily.filter((row) => Number(row.external_bytes) > 0).length
+  res.json({
+    timezone: analyticsTimeZone,
+    days: requestedDays,
+    startDate: start,
+    endDate: end,
+    summary: {
+      ...summary,
+      activeDays,
+      externalSharePercent: summary.bytes ? Number(((summary.externalBytes / summary.bytes) * 100).toFixed(1)) : 0,
+      averageBytes: activeDays ? Math.round(summary.bytes / activeDays) : 0,
+      averageExternalBytes: externalActiveDays ? Math.round(summary.externalBytes / externalActiveDays) : 0,
+      peakDate: peakDay?.date || null,
+      peakBytes: peakDay ? Number(peakDay.bytes) : 0,
+      peakExternalDate: peakExternalDay?.date || null,
+      peakExternalBytes: peakExternalDay ? Number(peakExternalDay.external_bytes) : 0,
+    },
+    daily: daily.map((row) => ({
+      date: row.date,
+      requests: Number(row.requests),
+      bytes: Number(row.bytes),
+      externalRequests: Number(row.external_requests),
+      externalBytes: Number(row.external_bytes),
+      directRequests: Number(row.direct_requests),
+      directBytes: Number(row.direct_bytes),
+      internalRequests: Number(row.internal_requests),
+      internalBytes: Number(row.internal_bytes),
+      rangeRequests: Number(row.range_requests),
+    })),
+    topMedia: topMedia.map((row) => ({
+      mediaType: row.media_type,
+      mediaId: row.media_id,
+      name: row.name,
+      filename: row.filename,
+      requests: Number(row.requests),
+      bytes: Number(row.bytes),
+      externalRequests: Number(row.external_requests),
+      externalBytes: Number(row.external_bytes),
+      rangeRequests: Number(row.range_requests),
+    })),
+    referrers: referrers.map((row) => ({
+      host: row.host,
+      requests: Number(row.requests),
+      bytes: Number(row.bytes),
+      mediaCount: Number(row.media_count),
+    })),
   })
 })
 

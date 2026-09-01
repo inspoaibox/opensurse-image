@@ -48,6 +48,7 @@ const endpointGroups = [
       ['POST', '/api/video-categories', '创建视频分类'],
       ['PATCH', '/api/video-categories/:id/default', '设置默认上传视频分类'],
       ['GET', '/api/stats', '空间与本月 API 使用统计'],
+      ['GET', '/api/analytics/traffic?days=30', '网页后台的每日媒体流量、外链来源与高消耗媒体统计'],
     ],
   },
   {

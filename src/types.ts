@@ -1,4 +1,4 @@
-export type ViewName = 'dashboard' | 'gallery' | 'media' | 'users' | 'developer' | 'settings'
+export type ViewName = 'dashboard' | 'gallery' | 'media' | 'analytics' | 'users' | 'developer' | 'settings'
 
 export interface User {
   id: string
@@ -137,6 +137,29 @@ export interface VideoItem {
   createdAt: string
 }
 
+export type RemoteImportStatus = 'queued' | 'downloading' | 'processing' | 'completed' | 'failed'
+export type RemoteImportPhase = 'queued' | 'downloading' | 'detecting' | 'storing' | 'completed' | 'failed'
+
+export interface RemoteImportTask {
+  id: string
+  status: RemoteImportStatus
+  phase: RemoteImportPhase
+  sourceLabel: string
+  filename: string
+  mediaType: 'image' | 'video' | ''
+  progress: number
+  downloadedBytes: number
+  totalBytes: number | null
+  speed: number
+  eta: number | null
+  downloader: 'aria2c' | 'curl' | 'node' | null
+  connections: number
+  result: ImageItem | VideoItem | null
+  error: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface ImageProcessingSettings {
   enabled: boolean
   outputFormat: 'original' | 'jpg' | 'png' | 'webp' | 'avif'
@@ -162,4 +185,65 @@ export interface Stats {
   apiLimit: number
   apiSuccessRate: number
   apiAverageResponseMs: number
+}
+
+export interface TrafficAnalyticsDaily {
+  date: string
+  requests: number
+  bytes: number
+  externalRequests: number
+  externalBytes: number
+  directRequests: number
+  directBytes: number
+  internalRequests: number
+  internalBytes: number
+  rangeRequests: number
+}
+
+export interface TrafficAnalyticsMedia {
+  mediaType: 'image' | 'video'
+  mediaId: string
+  name: string
+  filename: string
+  requests: number
+  bytes: number
+  externalRequests: number
+  externalBytes: number
+  rangeRequests: number
+}
+
+export interface TrafficAnalyticsReferrer {
+  host: string
+  requests: number
+  bytes: number
+  mediaCount: number
+}
+
+export interface TrafficAnalytics {
+  timezone: string
+  days: number
+  startDate: string
+  endDate: string
+  summary: {
+    requests: number
+    bytes: number
+    externalRequests: number
+    externalBytes: number
+    directRequests: number
+    directBytes: number
+    internalRequests: number
+    internalBytes: number
+    rangeRequests: number
+    activeDays: number
+    externalSharePercent: number
+    averageBytes: number
+    averageExternalBytes: number
+    peakDate: string | null
+    peakBytes: number
+    peakExternalDate: string | null
+    peakExternalBytes: number
+  }
+  daily: TrafficAnalyticsDaily[]
+  topMedia: TrafficAnalyticsMedia[]
+  referrers: TrafficAnalyticsReferrer[]
 }

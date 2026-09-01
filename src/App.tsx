@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Album,
   ArrowRight,
+  BarChart3,
   Bell,
   BookOpen,
+  CalendarDays,
   Check,
   CheckCircle2,
   Clock3,
@@ -14,6 +16,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  ExternalLink,
   FolderPlus,
   Gauge,
   Grid2X2,
@@ -32,11 +35,13 @@ import {
   Maximize2,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
   Server,
   Settings,
   Share2,
   ShieldCheck,
+  ShieldAlert,
   Sparkles,
   Star,
   Trash2,
@@ -46,7 +51,7 @@ import {
   Video,
   X,
 } from 'lucide-react'
-import type { AlbumItem, ApiKeyItem, ImageItem, ImageMetadata, ImageProcessingSettings, Stats, StorageProviderItem, StorageProviderType, User, UserSummary, VideoCategoryItem, VideoItem, ViewName } from './types'
+import type { AlbumItem, ApiKeyItem, ImageItem, ImageMetadata, ImageProcessingSettings, RemoteImportTask, Stats, StorageProviderItem, StorageProviderType, TrafficAnalytics, User, UserSummary, VideoCategoryItem, VideoItem, ViewName } from './types'
 import ApiDocsModal from './ApiDocsModal'
 
 const defaultStats: Stats = {
@@ -66,6 +71,7 @@ const defaultVideoExtensions = ['mp4', 'webm', 'mov', 'm4v', 'avi', 'mkv']
 const defaultVideoMaxFileSize = 500 * 1024 * 1024
 const extensionAccept = (extensions: string[]) => extensions.map((extension) => `.${extension}`).join(',')
 const extensionSummary = (extensions: string[]) => extensions.map((extension) => extension.toUpperCase()).join('、')
+const mediaExtensionAccept = (imageExtensions: string[], videoExtensions: string[]) => [...imageExtensions, ...videoExtensions].map((extension) => `.${extension}`).join(',')
 const uploadFileMatches = (file: File, extensions: string[]) => {
   const extension = file.name.split('.').pop()?.toLowerCase()
   return Boolean(extension && file.name.includes('.') && extensions.includes(extension))
@@ -81,26 +87,17 @@ const validateUploadSelection = (files: File[], extensions: string[], maxFiles: 
   return ''
 }
 
-const videoExtensionAccept = (extensions: string[]) => extensions.map((extension) => `video/${extension}`).concat(extensions.map((extension) => `.${extension}`)).join(',')
 const videoFileMatches = (file: File, extensions: string[]) => {
   const extension = file.name.split('.').pop()?.toLowerCase()
   return Boolean(extension && file.name.includes('.') && extensions.includes(extension))
 }
-
-const validateVideoSelection = (files: File[], extensions: string[], maxFiles: number, maxFileSize: number) => {
-  if (!files.length) return '请选择需要上传的视频'
-  if (files.length > maxFiles) return `单次最多上传 ${maxFiles} 个视频`
-  const invalidType = files.find((file) => !videoFileMatches(file, extensions))
-  if (invalidType) return `${invalidType.name} 的文件类型不在允许列表中`
-  const oversized = files.find((file) => file.size > maxFileSize)
-  if (oversized) return `${oversized.name} 超过 ${Math.round(maxFileSize / 1024 / 1024)} MB 限制`
-  return ''
-}
+const mediaFileMatches = (file: File, imageExtensions: string[], videoExtensions: string[]) => uploadFileMatches(file, imageExtensions) || videoFileMatches(file, videoExtensions)
 
 const viewMeta: Record<ViewName, { title: string; eyebrow: string }> = {
   dashboard: { title: '工作台', eyebrow: '今天也要好好整理灵感' },
   gallery: { title: '图片库', eyebrow: '查找、整理与分享全部素材' },
   media: { title: '媒体库', eyebrow: '分别管理图片相册与视频分类' },
+  analytics: { title: '统计分析', eyebrow: '查看引用分享流量与异常访问' },
   users: { title: '成员管理', eyebrow: '管理团队成员与空间权限' },
   developer: { title: '开发者', eyebrow: 'API、密钥与自动化工作流' },
   settings: { title: '系统设置', eyebrow: '存储、安全与个性化偏好' },
@@ -147,6 +144,11 @@ const formatDate = (value: string) => {
   return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
 }
 
+const formatAnalyticsDate = (value: string) => {
+  const date = new Date(`${value}T12:00:00`)
+  return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
+}
+
 const videoCategoryName = (video: VideoItem) => video.category || video.album || '视频'
 
 type VideoUploadPhase = 'uploading' | 'processing'
@@ -171,37 +173,52 @@ const formatEta = (seconds: number | null) => {
   return `约 ${minutes} 分 ${remainingSeconds} 秒`
 }
 
+function uploadMultipartRequest<T extends unknown[]>(
+  url: string,
+  form: FormData,
+  onProgress: (loaded: number, total: number) => void,
+  onUploadComplete = () => {},
+  errorLabel = '上传',
+) {
+  return new Promise<T>((resolve, reject) => {
+    const request = new XMLHttpRequest()
+    request.open('POST', url)
+    request.responseType = 'json'
+    request.withCredentials = true
+    request.setRequestHeader('Accept', 'application/json')
+    request.upload.addEventListener('progress', (event) => {
+      if (event.lengthComputable) onProgress(event.loaded, event.total)
+    })
+    request.upload.addEventListener('load', onUploadComplete)
+    request.addEventListener('load', () => {
+      const body = request.response as { message?: string } | T | null
+      if (request.status < 200 || request.status >= 300) {
+        const message = body && !Array.isArray(body) && typeof body.message === 'string' ? body.message : `${errorLabel}失败`
+        reject(new Error(message))
+        return
+      }
+      if (!Array.isArray(body)) {
+        reject(new Error(`${errorLabel}返回格式不正确`))
+        return
+      }
+      resolve(body as T)
+    })
+    request.addEventListener('error', () => reject(new Error('上传连接失败，请检查网络后重试')))
+    request.addEventListener('abort', () => reject(new Error('上传已取消')))
+    request.send(form)
+  })
+}
+
+const uploadImageRequest = (
+  form: FormData,
+  onProgress: (loaded: number, total: number) => void,
+) => uploadMultipartRequest<ImageItem[]>('/api/images', form, onProgress, undefined, '图片上传')
+
 const uploadVideoRequest = (
   form: FormData,
   onProgress: (loaded: number, total: number) => void,
   onProcessing: () => void,
-) => new Promise<VideoItem[]>((resolve, reject) => {
-  const request = new XMLHttpRequest()
-  request.open('POST', '/api/videos')
-  request.responseType = 'json'
-  request.withCredentials = true
-  request.setRequestHeader('Accept', 'application/json')
-  request.upload.addEventListener('progress', (event) => {
-    if (event.lengthComputable) onProgress(event.loaded, event.total)
-  })
-  request.upload.addEventListener('load', onProcessing)
-  request.addEventListener('load', () => {
-    const body = request.response as { message?: string } | VideoItem[] | null
-    if (request.status < 200 || request.status >= 300) {
-      const message = body && !Array.isArray(body) && typeof body.message === 'string' ? body.message : '视频上传失败'
-      reject(new Error(message))
-      return
-    }
-    if (!Array.isArray(body)) {
-      reject(new Error('视频上传返回格式不正确'))
-      return
-    }
-    resolve(body)
-  })
-  request.addEventListener('error', () => reject(new Error('视频上传连接失败，请检查网络后重试')))
-  request.addEventListener('abort', () => reject(new Error('视频上传已取消')))
-  request.send(form)
-})
+) => uploadMultipartRequest<VideoItem[]>('/api/videos', form, onProgress, onProcessing, '视频上传')
 
 const formatDateTime = (value: string) => new Date(value).toLocaleString('zh-CN', {
   year: 'numeric',
@@ -360,8 +377,10 @@ function App() {
   const [dataError, setDataError] = useState('')
   const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
+  const [uploadPhase, setUploadPhase] = useState<'images' | 'videos' | null>(null)
   const [videoUploadStatus, setVideoUploadStatus] = useState<VideoUploadStatus | null>(null)
   const [uploadResults, setUploadResults] = useState<ImageItem[]>([])
+  const [videoUploadResults, setVideoUploadResults] = useState<VideoItem[]>([])
   const [shareImage, setShareImage] = useState<ImageItem | null>(null)
   const [shareVideo, setShareVideo] = useState<VideoItem | null>(null)
   const [toast, setToast] = useState('')
@@ -460,62 +479,56 @@ function App() {
     setVideoCategory('全部分类')
     setMediaTab('albums')
     setUploadResults([])
+    setVideoUploadResults([])
+    setUploadPhase(null)
+    setVideoUploadStatus(null)
     setShareImage(null)
     setShareVideo(null)
     setStats(defaultStats)
     setActiveView('dashboard')
   }
 
-  const uploadFiles = async (files: File[], albumName = selectedUploadAlbum) => {
-    if (!files.length || uploading) return
-    const validationError = validateUploadSelection(files, allowedExtensions, 20, 20 * 1024 * 1024)
-    if (validationError) return notify(validationError)
-    setUploading(true)
-    setUploadProgress(10)
-    const ticker = window.setInterval(() => {
-      setUploadProgress((value) => (value < 86 ? value + Math.max(2, Math.round((86 - value) / 6)) : value))
-    }, 180)
-    try {
-      const form = new FormData()
-      files.forEach((file) => form.append('files', file))
-      if (albumName) form.append('album', albumName)
-      const response = await fetch('/api/images', { method: 'POST', body: form })
-      if (!response.ok) {
-        const detail = await response.json().catch(() => ({ message: '上传失败' }))
-        throw new Error(detail.message)
-      }
-      const created: ImageItem[] = await response.json()
-      setUploadProgress(100)
-      setImages((current) => [...created, ...current])
-      setStats((current) => ({
-        ...current,
-        images: current.images + created.length,
-        used: current.used + created.reduce((sum, item) => sum + item.size, 0),
-      }))
-      setShareImage(null)
-      setUploadResults(created)
-      notify(`${created.length} 张图片已安全入库`)
-    } catch (error) {
-      notify(error instanceof Error ? error.message : '上传失败，请重试')
-    } finally {
-      window.clearInterval(ticker)
-      window.setTimeout(() => {
-        setUploading(false)
-        setUploadProgress(0)
-      }, 500)
-    }
+  const uploadImageBatch = async (files: File[], albumName: string) => {
+    const totalFileBytes = files.reduce((sum, file) => sum + file.size, 0)
+    const form = new FormData()
+    files.forEach((file) => form.append('files', file))
+    if (albumName) form.append('album', albumName)
+    const created = await uploadImageRequest(form, (loaded, total) => {
+      const actualTotal = total > 0 ? total : totalFileBytes
+      setUploadProgress(actualTotal > 0 ? Math.min(100, Math.round((loaded / actualTotal) * 100)) : 0)
+    })
+    setUploadProgress(100)
+    setImages((current) => [...created, ...current])
+    setStats((current) => ({
+      ...current,
+      images: current.images + created.length,
+      used: current.used + created.reduce((sum, item) => sum + item.size, 0),
+    }))
+    setShareImage(null)
+    setUploadResults(created)
+    return created
   }
 
   const patchImage = async (id: string, changes: Partial<ImageItem>) => {
-    const response = await fetch(`/api/images/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(changes),
-    })
-    if (!response.ok) return notify('更新失败，请重试')
-    const updated: ImageItem = await response.json()
-    setImages((current) => current.map((item) => (item.id === id ? updated : item)))
-    if (shareImage?.id === id) setShareImage(updated)
+    try {
+      const response = await fetch(`/api/images/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(changes),
+      })
+      const detail = await response.json().catch(() => ({ message: '更新失败，请重试' }))
+      if (!response.ok) {
+        notify(detail.message || '更新失败，请重试')
+        return false
+      }
+      const updated = detail as ImageItem
+      setImages((current) => current.map((item) => (item.id === id ? updated : item)))
+      if (shareImage?.id === id) setShareImage(updated)
+      return true
+    } catch {
+      notify('更新失败，请重试')
+      return false
+    }
   }
 
   const deleteImages = async (ids: string[]) => {
@@ -539,17 +552,12 @@ function App() {
     notify(`${removed.length} 张图片已永久删除`)
   }
 
-  const uploadVideos = async (files: File[], categoryName = selectedUploadVideoCategory) => {
-    if (!files.length || uploading) return
-    const validationError = validateVideoSelection(files, videoExtensions, 10, videoMaxFileSize)
-    if (validationError) return notify(validationError)
+  const uploadVideoBatch = async (files: File[], categoryName: string) => {
     const totalFileBytes = files.reduce((sum, file) => sum + file.size, 0)
     const startedAt = performance.now()
     let lastLoaded = 0
     let lastProgressAt = startedAt
     let smoothedSpeed = 0
-    setUploading(true)
-    setUploadProgress(0)
     setVideoUploadStatus({
       phase: 'uploading',
       loaded: 0,
@@ -625,49 +633,124 @@ function App() {
         videos: current.videos + created.length,
         used: current.used + created.reduce((sum, item) => sum + item.size, 0),
       }))
-      notify(`${created.length} 个视频已安全入库`)
+      setShareVideo(null)
+      setVideoUploadResults(created)
+      return created
     } catch (error) {
-      notify(error instanceof Error ? error.message : '视频上传失败，请重试')
+      throw error
     } finally {
       window.clearInterval(activityMonitor)
+    }
+  }
+
+  const uploadMedia = async (files: File[], albumName = selectedUploadAlbum, categoryName = selectedUploadVideoCategory) => {
+    if (!files.length || uploading) return
+    const imageFiles = files.filter((file) => uploadFileMatches(file, allowedExtensions))
+    const videoFiles = files.filter((file) => !uploadFileMatches(file, allowedExtensions) && videoFileMatches(file, videoExtensions))
+    const invalidType = files.find((file) => !mediaFileMatches(file, allowedExtensions, videoExtensions))
+    if (invalidType) return notify(`${invalidType.name} 的文件类型不在允许列表中`)
+    if (imageFiles.length > 20) return notify('单次最多上传 20 张图片')
+    if (videoFiles.length > 10) return notify('单次最多上传 10 个视频')
+    const oversizedImage = imageFiles.find((file) => file.size > 20 * 1024 * 1024)
+    if (oversizedImage) return notify(`${oversizedImage.name} 超过 20 MB 限制`)
+    const oversizedVideo = videoFiles.find((file) => file.size > videoMaxFileSize)
+    if (oversizedVideo) return notify(`${oversizedVideo.name} 超过 ${Math.round(videoMaxFileSize / 1024 / 1024)} MB 限制`)
+
+    setUploading(true)
+    setUploadResults([])
+    setVideoUploadResults([])
+    setUploadProgress(0)
+    setUploadPhase(null)
+    setVideoUploadStatus(null)
+    try {
+      if (imageFiles.length) {
+        setUploadPhase('images')
+        await uploadImageBatch(imageFiles, albumName)
+      }
+      if (videoFiles.length) {
+        setUploadPhase('videos')
+        await uploadVideoBatch(videoFiles, categoryName)
+      }
+      const resultLabel = [
+        imageFiles.length ? `${imageFiles.length} 张图片` : '',
+        videoFiles.length ? `${videoFiles.length} 个视频` : '',
+      ].filter(Boolean).join('、')
+      notify(`${resultLabel}已安全入库`)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '上传失败，请重试')
+    } finally {
       window.setTimeout(() => {
         setUploading(false)
         setUploadProgress(0)
+        setUploadPhase(null)
         setVideoUploadStatus(null)
       }, 500)
     }
   }
 
-  const patchVideo = async (id: string, changes: Partial<VideoItem>) => {
-    const response = await fetch(`/api/videos/${id}`, {
-      method: 'PATCH',
+  const startRemoteImport = async (source: string, connections: number) => {
+    if (uploading) throw new Error('当前正在上传本地媒体，请完成后再开始远程导入')
+    const response = await fetch('/api/remote-imports', {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(changes),
+      body: JSON.stringify({
+        source,
+        connections,
+        album: selectedUploadAlbum,
+        category: selectedUploadVideoCategory,
+      }),
     })
-    if (!response.ok) return notify('视频更新失败，请重试')
-    const updated: VideoItem = await response.json()
-    const previous = videos.find((item) => item.id === id)
-    setVideos((current) => current.map((item) => (item.id === id ? updated : item)))
-    if (previous && videoCategoryName(previous) !== videoCategoryName(updated)) {
-      setVideoCategories((current) => current.map((category) => {
-        if (category.name === videoCategoryName(previous)) {
-          return {
-            ...category,
-            videoCount: Math.max(0, category.videoCount - 1),
-            storageUsed: Math.max(0, category.storageUsed - previous.size),
+    const detail = await response.json().catch(() => ({ message: '远程导入请求失败，请重试' }))
+    if (!response.ok) throw new Error(detail.message || '远程导入请求失败，请重试')
+    return detail as RemoteImportTask
+  }
+
+  const refreshRemoteResult = async (task: RemoteImportTask) => {
+    await loadData()
+    if (task.mediaType === 'video') notify('远程视频已进入视频分类')
+    else if (task.mediaType === 'image') notify('远程图片已进入图片相册')
+  }
+
+  const patchVideo = async (id: string, changes: Partial<VideoItem>) => {
+    try {
+      const response = await fetch(`/api/videos/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(changes),
+      })
+      const detail = await response.json().catch(() => ({ message: '视频更新失败，请重试' }))
+      if (!response.ok) {
+        notify(detail.message || '视频更新失败，请重试')
+        return false
+      }
+      const updated = detail as VideoItem
+      const previous = videos.find((item) => item.id === id)
+      setVideos((current) => current.map((item) => (item.id === id ? updated : item)))
+      if (previous && videoCategoryName(previous) !== videoCategoryName(updated)) {
+        setVideoCategories((current) => current.map((category) => {
+          if (category.name === videoCategoryName(previous)) {
+            return {
+              ...category,
+              videoCount: Math.max(0, category.videoCount - 1),
+              storageUsed: Math.max(0, category.storageUsed - previous.size),
+            }
           }
-        }
-        if (category.name === videoCategoryName(updated)) {
-          return {
-            ...category,
-            videoCount: category.videoCount + 1,
-            storageUsed: category.storageUsed + updated.size,
+          if (category.name === videoCategoryName(updated)) {
+            return {
+              ...category,
+              videoCount: category.videoCount + 1,
+              storageUsed: category.storageUsed + updated.size,
+            }
           }
-        }
-        return category
-      }))
+          return category
+        }))
+      }
+      if (shareVideo?.id === id) setShareVideo(updated)
+      return true
+    } catch {
+      notify('视频更新失败，请重试')
+      return false
     }
-    if (shareVideo?.id === id) setShareVideo(updated)
   }
 
   const deleteVideos = async (ids: string[]) => {
@@ -702,12 +785,6 @@ function App() {
   }
 
   const jumpToUpload = () => {
-    if (activeView === 'media' && mediaTab === 'videos') {
-      setMediaTab('videos')
-      setActiveView('media')
-      window.setTimeout(() => document.getElementById('video-file-picker')?.click(), 0)
-      return
-    }
     setActiveView('dashboard')
     window.setTimeout(() => document.getElementById('file-picker')?.click(), 0)
   }
@@ -757,7 +834,9 @@ function App() {
       case 'gallery':
         return <GalleryView images={images} albums={albums} selectedAlbum={galleryAlbum} onAlbumChange={setGalleryAlbum} loading={loading} onShare={setShareImage} onPatch={patchImage} onDelete={deleteImages} />
       case 'media':
-        return <MediaLibraryView tab={mediaTab} onTabChange={setMediaTab} albums={albums} images={images} onOpenGallery={openAlbum} onAlbumCreated={addAlbum} onSetDefault={setDefaultAlbum} videoCategories={videoCategories} videos={videos} onCategoryCreated={addVideoCategory} onSetDefaultCategory={setDefaultVideoCategory} selectedCategory={videoCategory} onCategoryChange={setVideoCategory} uploadCategory={selectedUploadVideoCategory} onUploadCategoryChange={setSelectedUploadVideoCategory} extensions={videoExtensions} maxFileSize={videoMaxFileSize} loading={loading} uploading={uploading} uploadStatus={videoUploadStatus} onUpload={uploadVideos} onShare={setShareVideo} onPatch={patchVideo} onDelete={deleteVideos} notify={notify} />
+        return <MediaLibraryView tab={mediaTab} onTabChange={setMediaTab} albums={albums} images={images} onOpenGallery={openAlbum} onAlbumCreated={addAlbum} onSetDefault={setDefaultAlbum} videoCategories={videoCategories} videos={videos} onCategoryCreated={addVideoCategory} onSetDefaultCategory={setDefaultVideoCategory} selectedCategory={videoCategory} onCategoryChange={setVideoCategory} loading={loading} onShare={setShareVideo} onPatch={patchVideo} onDelete={deleteVideos} notify={notify} />
+      case 'analytics':
+        return <AnalyticsView notify={notify} />
       case 'users':
         return user?.role === 'admin' ? <UsersView currentUser={user} notify={notify} onUserUpdated={handleManagedUserUpdate} /> : null
       case 'developer':
@@ -769,13 +848,26 @@ function App() {
           <DashboardView
             uploading={uploading}
             uploadProgress={uploadProgress}
+            uploadPhase={uploadPhase}
+            videoUploadStatus={videoUploadStatus}
             uploadResults={uploadResults}
+            videoUploadResults={videoUploadResults}
             albums={albums}
+            videoCategories={videoCategories}
             allowedExtensions={allowedExtensions}
+            videoExtensions={videoExtensions}
+            videoMaxFileSize={videoMaxFileSize}
             selectedAlbum={selectedUploadAlbum}
             onAlbumChange={setSelectedUploadAlbum}
-            onUpload={uploadFiles}
-            onClearResults={() => setUploadResults([])}
+            selectedVideoCategory={selectedUploadVideoCategory}
+            onVideoCategoryChange={setSelectedUploadVideoCategory}
+            onUpload={uploadMedia}
+            onRemoteImport={startRemoteImport}
+            onRemoteCompleted={refreshRemoteResult}
+            onClearResults={() => {
+              setUploadResults([])
+              setVideoUploadResults([])
+            }}
             notify={notify}
           />
         )
@@ -791,7 +883,7 @@ function App() {
     <div className="app-shell">
       <Sidebar activeView={activeView} onChange={navigateToView} stats={stats} user={user} onLogout={logout} />
       <main className="main-shell">
-        <Header activeView={activeView} mediaTab={mediaTab} onUpload={jumpToUpload} />
+        <Header activeView={activeView} onUpload={jumpToUpload} />
         <div className="page-content">{renderView()}</div>
       </main>
       {shareImage && (
@@ -983,6 +1075,7 @@ function Sidebar({ activeView, onChange, stats, user, onLogout }: { activeView: 
     { id: 'media' as const, label: '媒体库', icon: Images, count: stats.images + stats.videos },
   ]
   const secondary: NavItem[] = [
+    { id: 'analytics' as const, label: '统计分析', icon: BarChart3 },
     ...(user.role === 'admin' ? [{ id: 'users' as ViewName, label: '成员管理', icon: Users }] : []),
     { id: 'developer' as const, label: '开发者', icon: Code2 },
     { id: 'settings' as const, label: '系统设置', icon: Settings },
@@ -1025,8 +1118,7 @@ function Sidebar({ activeView, onChange, stats, user, onLogout }: { activeView: 
   )
 }
 
-function Header({ activeView, mediaTab, onUpload }: { activeView: ViewName; mediaTab: 'albums' | 'videos'; onUpload: () => void }) {
-  const uploadLabel = activeView === 'media' && mediaTab === 'videos' ? '上传视频' : '上传图片'
+function Header({ activeView, onUpload }: { activeView: ViewName; onUpload: () => void }) {
   return (
     <header className="topbar">
       <div className="page-title">
@@ -1034,7 +1126,7 @@ function Header({ activeView, mediaTab, onUpload }: { activeView: ViewName; medi
         <h1>{viewMeta[activeView].title}</h1>
       </div>
       <div className="header-actions">
-        <button className="button button-primary" onClick={onUpload}><Upload size={17} /> {uploadLabel}</button>
+        <button className="button button-primary" onClick={onUpload}><Upload size={17} /> 上传媒体</button>
       </div>
     </header>
   )
@@ -1043,59 +1135,106 @@ function Header({ activeView, mediaTab, onUpload }: { activeView: ViewName; medi
 function DashboardView({
   uploading,
   uploadProgress,
+  uploadPhase,
+  videoUploadStatus,
   uploadResults,
+  videoUploadResults,
   albums,
+  videoCategories,
   allowedExtensions,
+  videoExtensions,
+  videoMaxFileSize,
   selectedAlbum,
   onAlbumChange,
+  selectedVideoCategory,
+  onVideoCategoryChange,
   onUpload,
+  onRemoteImport,
+  onRemoteCompleted,
   onClearResults,
   notify,
 }: {
   uploading: boolean
   uploadProgress: number
+  uploadPhase: 'images' | 'videos' | null
+  videoUploadStatus: VideoUploadStatus | null
   uploadResults: ImageItem[]
+  videoUploadResults: VideoItem[]
   albums: AlbumItem[]
+  videoCategories: VideoCategoryItem[]
   allowedExtensions: string[]
+  videoExtensions: string[]
+  videoMaxFileSize: number
   selectedAlbum: string
   onAlbumChange: (album: string) => void
-  onUpload: (files: File[], albumName?: string) => void
+  selectedVideoCategory: string
+  onVideoCategoryChange: (category: string) => void
+  onUpload: (files: File[], albumName?: string, categoryName?: string) => void
+  onRemoteImport: (source: string, connections: number) => Promise<RemoteImportTask>
+  onRemoteCompleted: (task: RemoteImportTask) => Promise<void>
   onClearResults: () => void
   notify: (message: string) => void
 }) {
+  const hasResults = uploadResults.length > 0 || videoUploadResults.length > 0
   return (
     <div className="dashboard-upload-focus">
       <div className="dashboard-upload-panel">
-        <UploadZone selectedAlbum={selectedAlbum} allowedExtensions={allowedExtensions} uploading={uploading} progress={uploadProgress} onUpload={onUpload} />
-        <UploadDestination albums={albums} selectedAlbum={selectedAlbum} uploading={uploading} onAlbumChange={onAlbumChange} />
+        <UploadZone
+          selectedAlbum={selectedAlbum}
+          selectedVideoCategory={selectedVideoCategory}
+          allowedExtensions={allowedExtensions}
+          videoExtensions={videoExtensions}
+          videoMaxFileSize={videoMaxFileSize}
+          uploading={uploading}
+          uploadPhase={uploadPhase}
+          progress={uploadProgress}
+          videoUploadStatus={videoUploadStatus}
+          onUpload={onUpload}
+        />
+        <UploadDestinations
+          albums={albums}
+          videoCategories={videoCategories}
+          selectedAlbum={selectedAlbum}
+          selectedVideoCategory={selectedVideoCategory}
+          uploading={uploading}
+          onAlbumChange={onAlbumChange}
+          onVideoCategoryChange={onVideoCategoryChange}
+        />
+        <RemoteImportPanel
+          selectedAlbum={selectedAlbum}
+          selectedVideoCategory={selectedVideoCategory}
+          onStart={onRemoteImport}
+          onCompleted={onRemoteCompleted}
+        />
       </div>
-      {uploadResults.length > 0 && (
-        <InlineUploadResults images={uploadResults} onClear={onClearResults} notify={notify} />
+      {hasResults && (
+        <InlineUploadResults images={uploadResults} videos={videoUploadResults} onClear={onClearResults} notify={notify} />
       )}
     </div>
   )
 }
 
-function InlineUploadResults({ images, onClear, notify }: { images: ImageItem[]; onClear: () => void; notify: (message: string) => void }) {
+function InlineUploadResults({ images, videos, onClear, notify }: { images: ImageItem[]; videos: VideoItem[]; onClear: () => void; notify: (message: string) => void }) {
+  const total = images.length + videos.length
   const copyAllDirectLinks = async () => {
     try {
-      await copyText(images.map((image) => absoluteUrl(image.url)).join('\n'))
-      notify(`${images.length} 条图片直链已复制`)
+      await copyText([...images.map((image) => absoluteUrl(image.url)), ...videos.map((video) => absoluteUrl(video.url))].join('\n'))
+      notify(`${total} 条媒体直链已复制`)
     } catch {
-      notify('复制失败，请逐条复制图片直链')
+      notify('复制失败，请逐条复制媒体直链')
     }
   }
 
   return (
     <section className="upload-results-inline" aria-live="polite">
       <div className="upload-results-heading">
-        <div><span><CheckCircle2 size={19} /></span><div><h2>本次上传结果</h2><p>{images.length} 张图片已保存，引用地址显示在各图片下方。</p></div></div>
+        <div><span><CheckCircle2 size={19} /></span><div><h2>本次上传结果</h2><p>{images.length ? `${images.length} 张图片` : ''}{images.length && videos.length ? '、' : ''}{videos.length ? `${videos.length} 个视频` : ''}已保存，系统已按格式分流。</p></div></div>
         <div className="upload-results-actions">
-          {images.length > 1 && <button className="button button-secondary" onClick={() => void copyAllDirectLinks()}><Copy size={15} /> 复制全部直链</button>}
+          {total > 1 && <button className="button button-secondary" onClick={() => void copyAllDirectLinks()}><Copy size={15} /> 复制全部直链</button>}
           <button className="button button-ghost" onClick={onClear}><X size={15} /> 清空结果</button>
         </div>
       </div>
-      <div className={`upload-results-grid ${images.length === 1 ? 'single' : ''}`}>
+      <div className={`upload-results-grid ${total === 1 ? 'single' : ''}`}>
         {images.map((image) => (
           <article className="section-card upload-result-card" key={image.id}>
             <div className="upload-result-card-head">
@@ -1106,39 +1245,61 @@ function InlineUploadResults({ images, onClear, notify }: { images: ImageItem[];
             <div className="link-list"><ReferenceFields image={image} notify={notify} /></div>
           </article>
         ))}
+        {videos.map((video) => (
+          <article className="section-card upload-result-card" key={video.id}>
+            <div className="upload-result-card-head">
+              <video src={video.url} preload="metadata" muted playsInline />
+              <span><small>{videoCategoryName(video)}</small><h3>{video.name}</h3><p>{video.type} · {formatBytes(video.size)}</p></span>
+              <CheckCircle2 size={18} />
+            </div>
+            <div className="link-list"><VideoReferenceFields video={video} notify={notify} /></div>
+          </article>
+        ))}
       </div>
     </section>
   )
 }
 
-function UploadZone({ selectedAlbum, allowedExtensions, uploading, progress, onUpload }: {
+function UploadZone({ selectedAlbum, selectedVideoCategory, allowedExtensions, videoExtensions, videoMaxFileSize, uploading, uploadPhase, progress, videoUploadStatus, onUpload }: {
   selectedAlbum: string
+  selectedVideoCategory: string
   allowedExtensions: string[]
+  videoExtensions: string[]
+  videoMaxFileSize: number
   uploading: boolean
+  uploadPhase: 'images' | 'videos' | null
   progress: number
-  onUpload: (files: File[], albumName?: string) => void
+  videoUploadStatus: VideoUploadStatus | null
+  onUpload: (files: File[], albumName?: string, categoryName?: string) => void
 }) {
   const [dragging, setDragging] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const receive = (fileList: FileList | null) => {
-    if (fileList) onUpload(Array.from(fileList), selectedAlbum)
+    if (fileList) onUpload(Array.from(fileList), selectedAlbum, selectedVideoCategory)
   }
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
-      const pastedImages = Array.from(event.clipboardData?.items || [])
+      const pastedMedia = Array.from(event.clipboardData?.items || [])
         .filter((item) => item.kind === 'file')
         .map((item) => item.getAsFile())
         .filter((file): file is File => Boolean(file))
-        .filter((file) => uploadFileMatches(file, allowedExtensions))
-      if (pastedImages.length) {
+        .filter((file) => mediaFileMatches(file, allowedExtensions, videoExtensions))
+      if (pastedMedia.length) {
         event.preventDefault()
-        onUpload(pastedImages, selectedAlbum)
+        onUpload(pastedMedia, selectedAlbum, selectedVideoCategory)
       }
     }
     window.addEventListener('paste', handlePaste)
     return () => window.removeEventListener('paste', handlePaste)
-  }, [onUpload, selectedAlbum, allowedExtensions])
+  }, [onUpload, selectedAlbum, selectedVideoCategory, allowedExtensions, videoExtensions])
+
+  const phaseTitle = uploadPhase === 'videos' ? '视频正在上传…' : uploadPhase === 'images' ? '图片正在上传…' : '媒体正在整理…'
+  const uploadDescription = uploadPhase === 'videos'
+    ? '大文件上传期间请不要关闭页面'
+    : uploadPhase === 'images'
+      ? '图片正在上传，请稍候'
+      : '上传期间请不要关闭页面'
 
   return (
     <section
@@ -1147,44 +1308,173 @@ function UploadZone({ selectedAlbum, allowedExtensions, uploading, progress, onU
       onDragLeave={() => setDragging(false)}
       onDrop={(event) => { event.preventDefault(); setDragging(false); receive(event.dataTransfer.files) }}
     >
-      <input id="file-picker" ref={inputRef} type="file" accept={extensionAccept(allowedExtensions)} multiple hidden onChange={(event) => { receive(event.target.files); event.currentTarget.value = '' }} />
+      <input id="file-picker" ref={inputRef} type="file" accept={mediaExtensionAccept(allowedExtensions, videoExtensions)} multiple hidden onChange={(event) => { receive(event.target.files); event.currentTarget.value = '' }} />
       <span className="upload-icon"><Upload size={27} /></span>
       <div className="upload-copy">
-        <h3>{uploading ? '正在安放你的图片…' : '把图片拖到这里'}</h3>
-        <p>{uploading ? '上传期间请不要关闭页面' : `允许 ${extensionSummary(allowedExtensions)}，单张最大 20MB`}</p>
+        <h3>{uploading ? phaseTitle : '把图片或视频拖到这里'}</h3>
+        <p>{uploading ? uploadDescription : `图片 ${extensionSummary(allowedExtensions)} · 视频 ${extensionSummary(videoExtensions)}，按格式自动分流；图片 20MB / 个，视频 ${Math.round(videoMaxFileSize / 1024 / 1024)}MB / 个`}</p>
       </div>
       {uploading ? (
-        <div className="upload-progress-wrap">
-          <div className="upload-progress"><i style={{ width: `${progress}%` }} /></div>
-          <b>{progress}%</b>
-        </div>
+        uploadPhase === 'videos'
+          ? <VideoUploadProgress status={videoUploadStatus} />
+          : <div className="upload-progress-wrap">
+              <div className="upload-progress"><i style={{ width: `${progress}%` }} /></div>
+              <b>{progress}%</b>
+            </div>
       ) : (
         <>
-          <button className="button button-secondary" onClick={() => inputRef.current?.click()}>选择图片</button>
-          <div className="upload-hints"><span><Check size={13} /> 支持批量上传</span><span><Clipboard size={13} /> 可直接粘贴</span><span><ShieldCheck size={13} /> 原图安全保存</span></div>
+          <button className="button button-secondary" onClick={() => inputRef.current?.click()}>选择图片或视频</button>
+          <div className="upload-hints"><span><Check size={13} /> 支持批量混合上传</span><span><Clipboard size={13} /> 可直接粘贴</span><span><ShieldCheck size={13} /> 按格式自动归类</span></div>
         </>
       )}
     </section>
   )
 }
 
-function UploadDestination({ albums, selectedAlbum, uploading, onAlbumChange }: {
+function UploadDestinations({ albums, videoCategories, selectedAlbum, selectedVideoCategory, uploading, onAlbumChange, onVideoCategoryChange }: {
   albums: AlbumItem[]
+  videoCategories: VideoCategoryItem[]
   selectedAlbum: string
+  selectedVideoCategory: string
   uploading: boolean
   onAlbumChange: (album: string) => void
+  onVideoCategoryChange: (category: string) => void
 }) {
   const defaultAlbum = albums.find((album) => album.isDefault)
+  const defaultCategory = videoCategories.find((category) => category.isDefault)
   return (
     <div className="upload-destination-row">
       <label className="upload-album-select">
         <Album size={16} />
-        <span>保存到</span>
+        <span>图片存入</span>
         <select value={selectedAlbum} disabled={uploading} onChange={(event) => onAlbumChange(event.target.value)} aria-label="上传到相册">
           <option value="">默认相册 · {defaultAlbum?.name || '未分类'}</option>
           {albums.filter((album) => !album.isDefault).map((album) => <option key={album.id} value={album.name}>{album.name}</option>)}
         </select>
       </label>
+      <label className="upload-album-select">
+        <Video size={16} />
+        <span>视频存入</span>
+        <select value={selectedVideoCategory} disabled={uploading} onChange={(event) => onVideoCategoryChange(event.target.value)} aria-label="上传到视频分类">
+          <option value="">默认分类 · {defaultCategory?.name || '视频'}</option>
+          {videoCategories.filter((category) => !category.isDefault).map((category) => <option key={category.id} value={category.name}>{category.name}</option>)}
+        </select>
+      </label>
+      <small className="upload-destination-note">上传前可分别指定图片相册和视频分类，未指定时使用各自默认项。</small>
+    </div>
+  )
+}
+
+function RemoteImportPanel({ selectedAlbum, selectedVideoCategory, onStart, onCompleted }: {
+  selectedAlbum: string
+  selectedVideoCategory: string
+  onStart: (source: string, connections: number) => Promise<RemoteImportTask>
+  onCompleted: (task: RemoteImportTask) => Promise<void>
+}) {
+  const [source, setSource] = useState('')
+  const [connections, setConnections] = useState(4)
+  const [task, setTask] = useState<RemoteImportTask | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+  const completedTask = useRef('')
+  const taskId = task?.id
+  const taskStatus = task?.status
+
+  useEffect(() => {
+    if (!taskId || taskStatus === 'completed' || taskStatus === 'failed') return
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/remote-imports/${taskId}`)
+        const detail = await response.json().catch(() => ({ message: '远程任务状态读取失败' }))
+        if (!response.ok) throw new Error(detail.message || '远程任务状态读取失败')
+        if (cancelled) return
+        const next = detail as RemoteImportTask
+        setTask(next)
+        if (next.status === 'completed' && completedTask.current !== next.id) {
+          completedTask.current = next.id
+          await onCompleted(next)
+        }
+      } catch (reason) {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : '远程任务状态读取失败')
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 1000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [onCompleted, taskId, taskStatus])
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    const value = source.trim()
+    if (!value || submitting || (task && ['queued', 'downloading', 'processing'].includes(task.status))) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const next = await onStart(value, connections)
+      setTask(next)
+      setSource('')
+      completedTask.current = ''
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '远程导入请求失败，请重试')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const active = Boolean(task && ['queued', 'downloading', 'processing'].includes(task.status))
+  const albumLabel = selectedAlbum || '各自默认相册'
+  const videoCategoryLabel = selectedVideoCategory || '各自默认分类'
+  return (
+    <section className="remote-import-panel">
+      <div className="remote-import-heading">
+        <span className="remote-import-icon"><Cloud size={20} /></span>
+        <div><h3>远程导入</h3><p>粘贴 HTTPS 地址或 curl 命令，由服务器直接下载到当前空间。</p></div>
+      </div>
+      <form className="remote-import-form" onSubmit={(event) => void submit(event)}>
+        <label className="remote-import-source">
+          <span>远程地址或 curl 命令</span>
+          <textarea value={source} disabled={active || submitting} onChange={(event) => setSource(event.target.value)} aria-label="远程地址或 curl 命令" placeholder="https://example.com/assets/demo.mp4&#10;或：curl -L https://example.com/assets/demo.png" rows={3} />
+        </label>
+        <div className="remote-import-actions">
+          <label className="remote-connections"><span>并发连接</span><select value={connections} disabled={active || submitting} onChange={(event) => setConnections(Number(event.target.value))} aria-label="远程下载并发连接数">{[1, 2, 4, 8, 16].map((value) => <option key={value} value={value}>{value} 线程</option>)}</select></label>
+          <button className="button button-secondary" disabled={active || submitting || !source.trim()}><Download size={16} /> {submitting ? '正在创建任务…' : '开始远程导入'}</button>
+        </div>
+      </form>
+      <p className="remote-import-note">图片将存入“{albumLabel}”，视频将存入“{videoCategoryLabel}”；系统会按下载后的真实格式自动归类。</p>
+      {error && <p className="remote-import-error">{error}</p>}
+      {task && <RemoteImportProgress task={task} />}
+    </section>
+  )
+}
+
+function RemoteImportProgress({ task }: { task: RemoteImportTask }) {
+  const phaseLabel = task.status === 'queued'
+    ? '等待下载'
+    : task.phase === 'downloading'
+      ? '服务器正在下载'
+      : task.phase === 'detecting'
+        ? '正在识别媒体格式'
+        : task.phase === 'storing'
+          ? '正在写入媒体库'
+          : task.status === 'completed'
+            ? '远程导入完成'
+            : '远程导入失败'
+  const progress = task.status === 'completed' ? 100 : Math.max(0, Math.min(100, task.progress))
+  const total = task.totalBytes
+  const transferLabel = total ? `${formatBytes(task.downloadedBytes)} / ${formatBytes(total)}` : `${formatBytes(task.downloadedBytes)} 已下载`
+  const downloaderLabel = task.downloader === 'aria2c' ? 'aria2c 多线程' : task.downloader === 'curl' ? 'curl' : task.downloader === 'node' ? 'Node 流式下载' : '等待选择下载器'
+  return (
+    <div className={`remote-import-progress ${task.status === 'failed' ? 'failed' : ''}`} aria-live="polite">
+      <div className="remote-import-progress-heading"><span>{task.status === 'completed' ? <CheckCircle2 size={15} /> : task.status === 'failed' ? <X size={15} /> : <LoaderCircle size={15} className="spin" />} {phaseLabel}</span><b>{progress}%</b></div>
+      <div className="remote-import-progress-track" role="progressbar" aria-label="远程下载进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><i style={{ width: `${progress}%` }} /></div>
+      <div className="remote-import-progress-meta"><span title={task.sourceLabel}>{task.filename || task.sourceLabel}</span><span>{transferLabel} · {downloaderLabel} · {task.connections} 线程</span></div>
+      {task.status === 'downloading' && <div className="remote-import-progress-detail">{task.speed > 0 ? `${formatTransferRate(task.speed)} · 预计剩余 ${formatEta(task.eta)}` : '正在等待远程服务器返回数据…'}</div>}
+      {task.status === 'failed' && <div className="remote-import-progress-detail error">{task.error}</div>}
+      {task.status === 'completed' && task.result && <div className="remote-import-progress-detail success">{task.mediaType === 'video' ? '已进入视频分类' : '已进入图片相册'} · {task.result.name}</div>}
     </div>
   )
 }
@@ -1255,21 +1545,14 @@ function GalleryView({ images, albums, selectedAlbum, onAlbumChange, loading, on
   )
 }
 
-function VideoLibrary({ videos, categories, selectedCategory, onCategoryChange, uploadCategory, onUploadCategoryChange, onCategoryCreated, onSetDefaultCategory, extensions, maxFileSize, loading, uploading, uploadStatus, onUpload, onShare, onPatch, onDelete, notify }: {
+function VideoLibrary({ videos, categories, selectedCategory, onCategoryChange, onCategoryCreated, onSetDefaultCategory, loading, onShare, onPatch, onDelete, notify }: {
   videos: VideoItem[]
   categories: VideoCategoryItem[]
   selectedCategory: string
   onCategoryChange: (category: string) => void
-  uploadCategory: string
-  onUploadCategoryChange: (category: string) => void
   onCategoryCreated: (category: VideoCategoryItem) => void
   onSetDefaultCategory: (categoryId: string) => Promise<void>
-  extensions: string[]
-  maxFileSize: number
   loading: boolean
-  uploading: boolean
-  uploadStatus: VideoUploadStatus | null
-  onUpload: (files: File[]) => void
   onShare: (video: VideoItem) => void
   onPatch: (id: string, changes: Partial<VideoItem>) => void
   onDelete: (ids: string[]) => void
@@ -1278,27 +1561,17 @@ function VideoLibrary({ videos, categories, selectedCategory, onCategoryChange, 
   const [query, setQuery] = useState('')
   const [type, setType] = useState('全部格式')
   const [selected, setSelected] = useState<string[]>([])
-  const [dragging, setDragging] = useState(false)
   const [showNewCategory, setShowNewCategory] = useState(false)
   const [newCategory, setNewCategory] = useState('')
   const [creatingCategory, setCreatingCategory] = useState(false)
-  const inputRef = useRef<HTMLInputElement>(null)
   const typeOptions = useMemo(() => ['全部格式', ...Array.from(new Set(videos.map((video) => video.type))).sort()], [videos])
   const categoryOptions = useMemo(() => ['全部分类', ...Array.from(new Set([...categories.map((category) => category.name), ...videos.map(videoCategoryName)]))], [categories, videos])
-  const defaultCategory = categories.find((category) => category.isDefault)
   const filtered = videos.filter((video) => {
     const matchQuery = video.name.toLowerCase().includes(query.toLowerCase())
     const matchType = type === '全部格式' || video.type === type
     const matchCategory = selectedCategory === '全部分类' || videoCategoryName(video) === selectedCategory
     return matchQuery && matchType && matchCategory
   })
-
-  const receive = (fileList: FileList | File[]) => {
-    const files = Array.from(fileList)
-    const validationError = validateVideoSelection(files, extensions, 10, maxFileSize)
-    if (validationError) return notify(validationError)
-    onUpload(files)
-  }
 
   const toggleSelect = (id: string) => setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
 
@@ -1339,18 +1612,6 @@ function VideoLibrary({ videos, categories, selectedCategory, onCategoryChange, 
           ))}
         </div>
       </section>
-      <section className={`video-upload-panel section-card ${dragging ? 'dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); receive(event.dataTransfer.files) }}>
-        <input id="video-file-picker" ref={inputRef} type="file" accept={videoExtensionAccept(extensions)} multiple hidden onChange={(event) => { receive(event.target.files || []); event.currentTarget.value = '' }} />
-        <span className="video-upload-icon"><Video size={25} /></span>
-        <div><h2>{uploading ? '视频正在上传…' : '把视频拖到这里'}</h2><p>{uploading ? '大文件上传期间请不要关闭页面' : `支持 ${extensionSummary(extensions)}，单个最大 ${Math.round(maxFileSize / 1024 / 1024)}MB，单次最多 10 个`}</p></div>
-        {uploading ? (
-          <VideoUploadProgress status={uploadStatus} />
-        ) : (
-          <button className="button button-primary" onClick={() => inputRef.current?.click()}><Upload size={16} /> 选择视频</button>
-        )}
-        <label className="video-category-select"><FolderPlus size={16} /><span>保存到</span><select value={uploadCategory} disabled={uploading} onChange={(event) => onUploadCategoryChange(event.target.value)} aria-label="视频上传分类"><option value="">默认分类 · {defaultCategory?.name || '视频'}</option>{categories.filter((category) => !category.isDefault).map((category) => <option key={category.id} value={category.name}>{category.name}</option>)}</select></label>
-      </section>
-
       <section className="video-toolbar section-card">
         <label className="gallery-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="按视频名称搜索" /></label>
         <select value={selectedCategory} onChange={(event) => onCategoryChange(event.target.value)} aria-label="筛选视频分类">{categoryOptions.map((name) => <option key={name}>{name}</option>)}</select>
@@ -1365,7 +1626,7 @@ function VideoLibrary({ videos, categories, selectedCategory, onCategoryChange, 
       </div>
 
       {loading ? <CardSkeletons /> : filtered.length === 0 ? (
-        <div className="empty-state"><span><Video size={28} /></span><h3>{videos.length ? '没有找到视频' : '视频库还是空的'}</h3><p>{videos.length ? '试试调整关键词或格式筛选。' : '选择视频或拖曳文件到上方上传区，开始建立视频库。'}</p></div>
+        <div className="empty-state"><span><Video size={28} /></span><h3>{videos.length ? '没有找到视频' : '视频库还是空的'}</h3><p>{videos.length ? '试试调整关键词或格式筛选。' : '前往工作台选择视频，上传后会自动进入视频分类。'}</p></div>
       ) : (
         <div className="video-grid">
           {filtered.map((video) => (
@@ -1493,11 +1754,69 @@ function VideoReferenceFields({ video, notify }: { video: VideoItem; notify: (me
   ))}</>
 }
 
+function RenameControl({ name, mediaLabel, onSave, notify }: {
+  name: string
+  mediaLabel: string
+  onSave: (name: string) => Promise<boolean>
+  notify: (message: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(name)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (!editing) setDraft(name)
+  }, [editing, name])
+
+  const startEditing = () => {
+    setDraft(name)
+    setEditing(true)
+  }
+
+  const cancelEditing = () => {
+    setDraft(name)
+    setEditing(false)
+  }
+
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault()
+    const nextName = draft.trim()
+    if (!nextName) return notify(`${mediaLabel}名称不能为空`)
+    if (nextName.length > 255) return notify(`${mediaLabel}名称不能超过 255 个字符`)
+    if (nextName === name) return setEditing(false)
+    setSaving(true)
+    try {
+      if (await onSave(nextName)) setEditing(false)
+    } catch {
+      notify(`${mediaLabel}重命名失败，请重试`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (editing) {
+    return (
+      <form className="share-name-editor" onSubmit={(event) => void save(event)}>
+        <input autoFocus value={draft} maxLength={255} aria-label={`重命名${mediaLabel}`} onChange={(event) => setDraft(event.target.value)} />
+        <button type="submit" className="save" disabled={saving} aria-label={`保存${mediaLabel}名称`} title={`保存${mediaLabel}名称`}><Check size={15} /></button>
+        <button type="button" disabled={saving} onClick={cancelEditing} aria-label="取消重命名" title="取消重命名"><X size={15} /></button>
+      </form>
+    )
+  }
+
+  return (
+    <div className="share-name-row">
+      <h3 title={name}>{name}</h3>
+      <button type="button" className="share-name-edit" onClick={startEditing} aria-label={`重命名${mediaLabel}`} title={`重命名${mediaLabel}`}><Pencil size={14} /></button>
+    </div>
+  )
+}
+
 function VideoShareModal({ video, categories, onClose, onPatch, onDelete, notify }: {
   video: VideoItem
   categories: VideoCategoryItem[]
   onClose: () => void
-  onPatch: (id: string, changes: Partial<VideoItem>) => void
+  onPatch: (id: string, changes: Partial<VideoItem>) => Promise<boolean>
   onDelete: () => void
   notify: (message: string) => void
 }) {
@@ -1532,7 +1851,7 @@ function VideoShareModal({ video, categories, onClose, onPatch, onDelete, notify
           <span>{video.type}</span>
         </div>
         <div className="share-body">
-          <div className="share-heading"><span><small>{videoCategoryName(video)}</small><h3>{video.name}</h3><p>{video.type} · {formatBytes(video.size)} · {formatDate(video.createdAt)}</p></span><button className={video.starred ? 'starred' : ''} onClick={() => void onPatch(video.id, { starred: !video.starred })} aria-label={video.starred ? '取消收藏' : '收藏视频'}><Star size={18} fill={video.starred ? 'currentColor' : 'none'} /></button></div>
+          <div className="share-heading"><span><small>{videoCategoryName(video)}</small><RenameControl name={video.name} mediaLabel="视频" onSave={(name) => onPatch(video.id, { name })} notify={notify} /><p>{video.type} · {formatBytes(video.size)} · {formatDate(video.createdAt)}</p></span><button className={video.starred ? 'starred' : ''} onClick={() => void onPatch(video.id, { starred: !video.starred })} aria-label={video.starred ? '取消收藏' : '收藏视频'}><Star size={18} fill={video.starred ? 'currentColor' : 'none'} /></button></div>
           <label className="video-detail-category"><span>所属分类</span><select value={videoCategoryName(video)} onChange={(event) => void onPatch(video.id, { category: event.target.value })}>{categories.map((category) => <option key={category.id} value={category.name}>{category.name}</option>)}</select></label>
           <div className="video-share-note"><Video size={15} /> 支持浏览器在线播放，分享直链后可用于网页、论坛或第三方播放器。</div>
           <div className="link-list"><VideoReferenceFields video={video} notify={notify} /></div>
@@ -1543,7 +1862,7 @@ function VideoShareModal({ video, categories, onClose, onPatch, onDelete, notify
   )
 }
 
-function MediaLibraryView({ tab, onTabChange, albums, images, onOpenGallery, onAlbumCreated, onSetDefault, videoCategories, videos, onCategoryCreated, onSetDefaultCategory, selectedCategory, onCategoryChange, uploadCategory, onUploadCategoryChange, extensions, maxFileSize, loading, uploading, uploadStatus, onUpload, onShare, onPatch, onDelete, notify }: {
+function MediaLibraryView({ tab, onTabChange, albums, images, onOpenGallery, onAlbumCreated, onSetDefault, videoCategories, videos, onCategoryCreated, onSetDefaultCategory, selectedCategory, onCategoryChange, loading, onShare, onPatch, onDelete, notify }: {
   tab: 'albums' | 'videos'
   onTabChange: (tab: 'albums' | 'videos') => void
   albums: AlbumItem[]
@@ -1557,14 +1876,7 @@ function MediaLibraryView({ tab, onTabChange, albums, images, onOpenGallery, onA
   onSetDefaultCategory: (categoryId: string) => Promise<void>
   selectedCategory: string
   onCategoryChange: (category: string) => void
-  uploadCategory: string
-  onUploadCategoryChange: (category: string) => void
-  extensions: string[]
-  maxFileSize: number
   loading: boolean
-  uploading: boolean
-  uploadStatus: VideoUploadStatus | null
-  onUpload: (files: File[], categoryName?: string) => void
   onShare: (video: VideoItem) => void
   onPatch: (id: string, changes: Partial<VideoItem>) => void
   onDelete: (ids: string[]) => void
@@ -1579,7 +1891,7 @@ function MediaLibraryView({ tab, onTabChange, albums, images, onOpenGallery, onA
       {tab === 'albums' ? (
         <AlbumsView albums={albums} images={images} onOpenGallery={onOpenGallery} onAlbumCreated={onAlbumCreated} onSetDefault={onSetDefault} notify={notify} />
       ) : (
-        <VideoLibrary videos={videos} categories={videoCategories} selectedCategory={selectedCategory} onCategoryChange={onCategoryChange} uploadCategory={uploadCategory} onUploadCategoryChange={onUploadCategoryChange} onCategoryCreated={onCategoryCreated} onSetDefaultCategory={onSetDefaultCategory} extensions={extensions} maxFileSize={maxFileSize} loading={loading} uploading={uploading} uploadStatus={uploadStatus} onUpload={onUpload} onShare={onShare} onPatch={onPatch} onDelete={onDelete} notify={notify} />
+        <VideoLibrary videos={videos} categories={videoCategories} selectedCategory={selectedCategory} onCategoryChange={onCategoryChange} onCategoryCreated={onCategoryCreated} onSetDefaultCategory={onSetDefaultCategory} loading={loading} onShare={onShare} onPatch={onPatch} onDelete={onDelete} notify={notify} />
       )}
     </div>
   )
@@ -1786,6 +2098,117 @@ function UsersView({ currentUser, notify, onUserUpdated }: { currentUser: User; 
           </form>
         </div>
       )}
+    </div>
+  )
+}
+
+function AnalyticsView({ notify }: { notify: (message: string) => void }) {
+  const [days, setDays] = useState(30)
+  const [analytics, setAnalytics] = useState<TrafficAnalytics | null>(null)
+  const [loadingAnalytics, setLoadingAnalytics] = useState(true)
+  const [error, setError] = useState('')
+
+  const loadAnalytics = useCallback(async () => {
+    setLoadingAnalytics(true)
+    setError('')
+    try {
+      const response = await fetch(`/api/analytics/traffic?days=${days}`)
+      const detail = await response.json().catch(() => ({ message: '统计数据读取失败' }))
+      if (!response.ok) throw new Error(detail.message || '统计数据读取失败')
+      setAnalytics(detail as TrafficAnalytics)
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : '统计数据读取失败'
+      setError(message)
+      notify(message)
+    } finally {
+      setLoadingAnalytics(false)
+    }
+  }, [days, notify])
+
+  useEffect(() => {
+    void loadAnalytics()
+  }, [loadAnalytics])
+
+  if (loadingAnalytics && !analytics) {
+    return <div className="empty-state analytics-loading"><span><BarChart3 size={28} /></span><h3>正在读取流量统计…</h3><p>正在汇总媒体直链的访问与引用数据。</p></div>
+  }
+  if (error && !analytics) {
+    return <div className="empty-state error-state"><span><Server size={28} /></span><h3>统计数据加载失败</h3><p>{error}</p><button className="button button-primary" onClick={() => void loadAnalytics()}><RefreshCw size={16} />重新加载</button></div>
+  }
+  if (!analytics) return null
+
+  const { summary, daily, topMedia, referrers } = analytics
+  const maxDailyBytes = Math.max(1, ...daily.map((item) => item.bytes))
+  const maxMediaBytes = Math.max(1, ...topMedia.map((item) => item.bytes))
+  const averageBytes = summary.averageBytes
+  const hasTrafficAlert = summary.peakBytes > 0
+    && summary.peakBytes >= Math.max(averageBytes * 2, 100 * 1024 * 1024)
+  const dateLabel = `${formatAnalyticsDate(analytics.startDate)} 至 ${formatAnalyticsDate(analytics.endDate)}`
+
+  return (
+    <div className="analytics-page">
+      <section className="analytics-overview">
+        <div>
+          <span className="eyebrow-pill light"><BarChart3 size={13} /> 流量分析</span>
+          <h2>看清每一次媒体引用。</h2>
+          <p>按天汇总图片和视频直链的实际响应流量，快速发现外链滥用和异常播放。</p>
+        </div>
+        <div className="analytics-overview-actions">
+          <label><CalendarDays size={15} /><span>统计范围</span><select value={days} onChange={(event) => setDays(Number(event.target.value))} aria-label="统计范围">{[7, 30, 90, 180, 365].map((value) => <option key={value} value={value}>最近 {value} 天</option>)}</select></label>
+          <button className="button button-light" onClick={() => void loadAnalytics()} disabled={loadingAnalytics}><RefreshCw size={16} className={loadingAnalytics ? 'spin' : ''} />刷新</button>
+        </div>
+      </section>
+
+      <div className="analytics-metrics">
+        <section className="section-card analytics-metric-card"><span className="metric-icon orange"><ExternalLink size={18} /></span><div><small>外部引用流量</small><b>{formatBytes(summary.externalBytes)}</b><p>{summary.externalRequests.toLocaleString()} 次外部请求</p></div></section>
+        <section className="section-card analytics-metric-card"><span className="metric-icon blue"><HardDrive size={18} /></span><div><small>全部媒体流量</small><b>{formatBytes(summary.bytes)}</b><p>{summary.requests.toLocaleString()} 次媒体请求</p></div></section>
+        <section className="section-card analytics-metric-card"><span className="metric-icon yellow"><Share2 size={18} /></span><div><small>外部流量占比</small><b>{summary.externalSharePercent.toFixed(1)}%</b><p>按服务器实际响应字节计算</p></div></section>
+        <section className="section-card analytics-metric-card"><span className="metric-icon green"><Video size={18} /></span><div><small>Range 请求</small><b>{summary.rangeRequests.toLocaleString()}</b><p>常见于视频播放和拖动</p></div></section>
+      </div>
+
+      {hasTrafficAlert
+        ? <div className="analytics-alert"><ShieldAlert size={18} /><span><b>发现需要关注的流量峰值</b><small>{formatAnalyticsDate(summary.peakDate || analytics.endDate)} 全部媒体流量达到 {formatBytes(summary.peakBytes)}，明显高于统计期间平均值；其中外部引用 {formatBytes(summary.peakExternalBytes)}。建议检查下方媒体和来源域名。</small></span></div>
+        : <div className="analytics-note"><ShieldCheck size={18} /><span><b>当前没有明显的外部流量峰值</b><small>统计范围：{dateLabel} · 时区：{analytics.timezone}。新部署后从服务器首次记录开始累计。</small></span></div>}
+
+      <section className="section-card analytics-chart-card">
+        <div className="section-heading"><div><h3>每日引用流量</h3><p>{dateLabel} · 外部引用显示为橙色</p></div><div className="analytics-legend"><span><i className="total" />全部流量</span><span><i className="external" />外部引用</span></div></div>
+        {daily.length ? <div className="analytics-chart" role="img" aria-label="每日媒体流量柱状图">
+          {daily.map((item, index) => {
+            const totalHeight = Math.max(4, (item.bytes / maxDailyBytes) * 100)
+            const externalHeight = item.bytes ? Math.min(100, (item.externalBytes / item.bytes) * 100) : 0
+            const labelStep = daily.length <= 31 ? 1 : Math.ceil(daily.length / 15)
+            return <div className="analytics-chart-column" key={item.date} title={`${formatAnalyticsDate(item.date)} · 总流量 ${formatBytes(item.bytes)} · 外部 ${formatBytes(item.externalBytes)}`}>
+              <div className="analytics-bar-wrap"><div className="analytics-bar" style={{ height: `${totalHeight}%` }}><i style={{ height: `${externalHeight}%` }} /></div></div>
+              {(index % labelStep === 0 || index === daily.length - 1) && <small>{item.date.slice(5)}</small>}
+            </div>
+          })}
+        </div> : <div className="analytics-empty">当前统计范围内还没有媒体直链访问记录。</div>}
+      </section>
+
+      <div className="analytics-lower-grid">
+        <section className="section-card analytics-list-card">
+          <div className="section-heading"><div><h3>高消耗媒体</h3><p>按实际总流量排序，外部引用单独标记</p></div><span className="status-pill">{topMedia.length} 项</span></div>
+          {topMedia.length ? <div className="analytics-media-list">{topMedia.map((item) => <div className="analytics-media-row" key={`${item.mediaType}-${item.mediaId}`}>
+            <span className={`analytics-media-icon ${item.mediaType}`}><>{item.mediaType === 'video' ? <Video size={17} /> : <ImageIcon size={17} />}</></span>
+            <span className="analytics-media-meta"><b title={item.name}>{item.name}</b><small>{item.mediaType === 'video' ? '视频' : '图片'} · {item.requests.toLocaleString()} 次请求 · 外部 {formatBytes(item.externalBytes)} · Range {item.rangeRequests.toLocaleString()} 次</small><i><em style={{ width: `${Math.max(3, (item.bytes / maxMediaBytes) * 100)}%` }} /></i></span>
+            <strong>{formatBytes(item.bytes)}</strong>
+          </div>)}</div> : <div className="analytics-empty">还没有媒体流量数据。</div>}
+        </section>
+
+        <section className="section-card analytics-list-card">
+          <div className="section-heading"><div><h3>外部来源域名</h3><p>只保存域名，不保存完整页面地址</p></div><span className="status-pill">{referrers.length} 个</span></div>
+          {referrers.length ? <div className="analytics-referrer-list">{referrers.map((item) => <div className="analytics-referrer-row" key={item.host}><span><ExternalLink size={15} /><b title={item.host}>{item.host}</b></span><strong>{formatBytes(item.bytes)}</strong><small>{item.requests.toLocaleString()} 次 · {item.mediaCount} 个媒体</small></div>)}</div> : <div className="analytics-empty">暂未识别到带来源域名的外部引用。</div>}
+        </section>
+      </div>
+
+      <section className="section-card analytics-breakdown-card">
+        <div className="section-heading"><div><h3>访问类型</h3><p>帮助区分站内浏览、无来源直链和外部嵌入</p></div></div>
+        <div className="analytics-breakdown-grid">
+          <div><span><i className="external" /><b>外部引用</b><strong>{formatBytes(summary.externalBytes)}</strong></span><small>{summary.externalRequests.toLocaleString()} 次请求</small></div>
+          <div><span><i className="direct" /><b>直接访问</b><strong>{formatBytes(summary.directBytes)}</strong></span><small>{summary.directRequests.toLocaleString()} 次请求</small></div>
+          <div><span><i className="internal" /><b>站内访问</b><strong>{formatBytes(summary.internalBytes)}</strong></span><small>{summary.internalRequests.toLocaleString()} 次请求</small></div>
+        </div>
+      </section>
     </div>
   )
 }
@@ -2301,7 +2724,7 @@ function ReferenceFields({ image, notify }: { image: ImageItem; notify?: (messag
 function ShareModal({ image, onClose, onPatch, onDelete, notify }: {
   image: ImageItem
   onClose: () => void
-  onPatch: (id: string, changes: Partial<ImageItem>) => void
+  onPatch: (id: string, changes: Partial<ImageItem>) => Promise<boolean>
   onDelete: () => void
   notify: (message: string) => void
 }) {
@@ -2363,7 +2786,7 @@ function ShareModal({ image, onClose, onPatch, onDelete, notify }: {
           <span>{image.type}</span>
         </div>
         <div className="share-body">
-          <div className="share-heading"><span><small>{image.album}</small><h3>{image.name}</h3><p>{image.width && image.height ? `${image.width} × ${image.height} · ` : ''}{formatBytes(image.size)} · {formatDate(image.createdAt)}</p></span><button className={image.starred ? 'starred' : ''} onClick={() => void onPatch(image.id, { starred: !image.starred })}><Star size={18} fill={image.starred ? 'currentColor' : 'none'} /></button></div>
+          <div className="share-heading"><span><small>{image.album}</small><RenameControl name={image.name} mediaLabel="图片" onSave={(name) => onPatch(image.id, { name })} notify={notify} /><p>{image.width && image.height ? `${image.width} × ${image.height} · ` : ''}{formatBytes(image.size)} · {formatDate(image.createdAt)}</p></span><button className={image.starred ? 'starred' : ''} onClick={() => void onPatch(image.id, { starred: !image.starred })}><Star size={18} fill={image.starred ? 'currentColor' : 'none'} /></button></div>
           <div className="share-tabs"><button className={activeTab === 'links' ? 'active' : ''} onClick={() => setActiveTab('links')}>分享链接</button><button className={activeTab === 'info' ? 'active' : ''} onClick={() => setActiveTab('info')}>图片信息</button></div>
           {activeTab === 'links' ? <div className="link-list"><ReferenceFields image={image} notify={notify} /></div> : <div className="image-info-content">
             <div className="image-info-grid">

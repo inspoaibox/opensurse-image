@@ -104,6 +104,14 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.equal(registration.response.status, 201)
   const adminCookie = registration.response.headers.get('set-cookie').split(';', 1)[0]
 
+  const invalidRemoteImport = await requestJson(`${baseUrl}/api/remote-imports`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+    body: JSON.stringify({ source: 'file:///etc/passwd' }),
+  })
+  assert.equal(invalidRemoteImport.response.status, 400)
+  assert.match(invalidRemoteImport.body.message, /HTTP 或 HTTPS/)
+
   const emptyImages = await requestJson(`${baseUrl}/api/images`, { headers: { Cookie: adminCookie } })
   assert.equal(emptyImages.response.status, 200)
   assert.deepEqual(emptyImages.body, [])
@@ -183,6 +191,16 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
 
   const crossOwnerRead = await requestJson(`${baseUrl}/api/images/${image.id}`, { headers: { Cookie: adminCookie } })
   assert.equal(crossOwnerRead.response.status, 404)
+
+  const renamedImage = await requestJson(`${baseUrl}/api/images/${image.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: memberCookie },
+    body: JSON.stringify({ name: '重命名图片' }),
+  })
+  assert.equal(renamedImage.response.status, 200)
+  assert.equal(renamedImage.body.name, '重命名图片')
+  assert.equal(renamedImage.body.filename, '重命名图片.png')
+  assert.equal(decodeURIComponent(new URL(renamedImage.body.url).pathname).endsWith('/重命名图片.png'), true)
 
   const statsBeforeVideo = await requestJson(`${baseUrl}/api/stats`, { headers: { Cookie: memberCookie } })
   assert.equal(statsBeforeVideo.response.status, 200)
@@ -326,6 +344,23 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.equal(videoRange.headers.get('content-range'), `bytes 1-4/${videoBytes.length}`)
   assert.equal(videoRange.headers.get('content-length'), '4')
   assert.deepEqual(Buffer.from(await videoRange.arrayBuffer()), videoBytes.subarray(1, 5))
+
+  const embeddedVideo = await fetch(video.url, { headers: { Referer: 'https://player.example.test/watch/demo' } })
+  assert.equal(embeddedVideo.status, 200)
+  assert.deepEqual(Buffer.from(await embeddedVideo.arrayBuffer()), videoBytes)
+
+  const trafficAnalytics = await requestJson(`${baseUrl}/api/analytics/traffic?days=7`, { headers: { Cookie: memberCookie } })
+  assert.equal(trafficAnalytics.response.status, 200)
+  assert.equal(trafficAnalytics.body.days, 7)
+  assert.equal(trafficAnalytics.body.summary.externalBytes, videoBytes.length)
+  assert.equal(trafficAnalytics.body.summary.rangeRequests, 1)
+  assert.equal(trafficAnalytics.body.daily.length, 7)
+  assert.equal(trafficAnalytics.body.daily.filter((item) => item.bytes > 0).length, 1)
+  assert.equal(trafficAnalytics.body.referrers[0].host, 'player.example.test')
+  assert.equal(trafficAnalytics.body.referrers[0].bytes, videoBytes.length)
+  const highestTrafficVideo = trafficAnalytics.body.topMedia.find((item) => item.mediaId === video.id)
+  assert.equal(highestTrafficVideo.mediaType, 'video')
+  assert.equal(highestTrafficVideo.externalBytes, videoBytes.length)
 
   const invalidVideoRange = await fetch(video.url, { headers: { Range: `bytes=${videoBytes.length}-` } })
   assert.equal(invalidVideoRange.status, 416)
