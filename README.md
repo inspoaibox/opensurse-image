@@ -333,6 +333,28 @@ sudo apt-get install -y aria2 curl
 
 远程导入只允许 HTTP/HTTPS，默认拒绝本机、局域网和其他私有地址，限制单任务最大大小为当前视频大小上限与 20 MB 图片上限中的较大值。下载完成后，服务端会根据实际图片格式或远程文件扩展名/MIME 类型自动进入图片相册或视频分类。任务页面关闭后，服务器端任务仍会继续运行；重新打开页面时，媒体列表可通过刷新看到已入库结果。
 
+远程导入也支持 Bearer API 密钥，适合服务器脚本、自动化流程或第三方服务直接提交远程视频。接口是异步的：创建成功返回 `202` 和任务 `id`，服务器随后执行下载、格式识别、分类和入库；客户端使用同一把 API 密钥轮询任务状态。请求体使用 JSON，`url` 和 `source` 二选一，`category` 仅在最终识别为视频时生效，`album` 仅在最终识别为图片时生效，`connections` 可选且范围为 1–16。
+
+```bash
+curl -X POST "https://img.example.com/api/remote-imports" \
+  -H "Authorization: Bearer pn_live_xxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://static.atlascloud.ai/prompt/seedance/seedance-2-0-prompts_4512_1.mp4",
+    "category": "远程视频",
+    "connections": 8
+  }'
+```
+
+返回任务后轮询：
+
+```bash
+curl "https://img.example.com/api/remote-imports/TASK_ID" \
+  -H "Authorization: Bearer pn_live_xxx"
+```
+
+任务完成时，`result` 会包含最终图片或视频对象；失败时读取 `error`。任务状态保存在当前服务进程内，服务重启或任务超过 1 小时后将无法继续查询。
+
 ## 统计分析
 
 登录后的“统计分析”会按当前用户展示最近 7、30、90、180 或 365 天的媒体直链流量。服务端会在图片或视频实际响应数据时记录返回字节、请求次数、Range 请求，以及请求来源类型：带其他域名 Referer 的请求计为外部引用，没有 Referer 的请求计为直接访问，当前站点 Referer 计为站内访问。外部引用只保存来源域名，不保存完整页面地址或客户端 IP。
@@ -1103,8 +1125,8 @@ API 上传可使用 multipart 字段 `format`、`quality`、`autoOrient`、`stri
 | `GET` | `/api/videos/:id` | 视频所有者 | 读取单个视频的完整对象与引用地址 |
 | `PATCH/DELETE` | `/api/videos/:id` | 视频所有者 | 修改名称、分类或收藏状态、删除视频 |
 | `POST` | `/api/videos/bulk-delete` | 视频所有者 | 批量删除视频 |
-| `POST` | `/api/remote-imports` | 用户会话 | 创建服务器端远程导入任务 |
-| `GET` | `/api/remote-imports/:id` | 创建者会话 | 查询远程导入任务进度和结果 |
+| `POST` | `/api/remote-imports` | 用户/API 密钥 | 创建服务器端远程导入任务，异步返回 `202` |
+| `GET` | `/api/remote-imports/:id` | 创建者/API 密钥 | 查询远程导入任务进度和结果 |
 | `GET/POST` | `/api/video-categories` | 用户/API 密钥 | 视频分类列表或创建 |
 | `PATCH` | `/api/video-categories/:id/default` | 分类所有者 | 设置默认上传视频分类 |
 | `GET/POST` | `/api/albums` | 用户/API 密钥 | 相册列表或创建 |

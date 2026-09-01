@@ -173,6 +173,7 @@ try {
   await page.getByText('UI 验收').waitFor()
   await page.getByRole('button', { name: '阅读 API 文档' }).click()
   await page.getByRole('heading', { name: 'API 文档' }).waitFor()
+  await page.locator('#api-doc-remote-import').getByRole('heading', { name: '远程导入', exact: true }).waitFor()
   await page.getByRole('heading', { name: '上传视频', exact: true }).waitFor()
   await page.getByRole('heading', { name: '视频管理', exact: true }).waitFor()
   await page.getByRole('heading', { name: '视频分类', exact: true }).waitFor()

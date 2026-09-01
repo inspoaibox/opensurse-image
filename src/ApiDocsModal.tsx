@@ -39,6 +39,13 @@ const endpointGroups = [
     ],
   },
   {
+    title: '远程导入',
+    rows: [
+      ['POST', '/api/remote-imports', '使用 URL 创建服务器端异步远程导入任务，支持图片和视频'],
+      ['GET', '/api/remote-imports/:id', '使用任务创建者的会话或 API 密钥查询下载进度和结果'],
+    ],
+  },
+  {
     title: '相册与统计',
     rows: [
       ['GET', '/api/albums', '列出当前用户相册'],
@@ -216,6 +223,16 @@ const videoUploadCurlExample = (baseUrl: string) => `curl -X POST "${baseUrl}/ap
   -F "files=@screen-recording.webm" \\
   -F "category=产品演示"`
 
+const remoteImportCurlExample = (baseUrl: string) => `# 创建远程导入任务
+curl -X POST "${baseUrl}/api/remote-imports" \\
+  -H "Authorization: Bearer pn_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"url":"https://static.atlascloud.ai/prompt/seedance/seedance-2-0-prompts_4512_1.mp4","category":"远程视频","connections":8}'
+
+# 使用返回的任务 ID 查询进度
+curl "${baseUrl}/api/remote-imports/TASK_ID" \\
+  -H "Authorization: Bearer pn_live_xxx"`
+
 const videoManagementCurlExample = (baseUrl: string) => `# 查询视频列表
 curl "${baseUrl}/api/videos" \\
   -H "Authorization: Bearer pn_live_xxx"
@@ -306,6 +323,14 @@ const buildMarkdownDocs = (baseUrl: string) => {
     markdownCodeBlock('bash', videoUploadCurlExample(baseUrl)),
     '',
     '视频不会经过图片处理引擎，服务端会校验扩展名与请求 MIME 类型，并按原始字节保存。返回对象包含可公开访问的直链、Markdown、BBCode 和 HTML5 video 引用，以及 `category` 分类字段。视频媒体地址支持 `Range` 请求，浏览器可以按需加载、拖动进度和断点播放。',
+    '',
+    '## 远程导入',
+    '',
+    '`POST /api/remote-imports` 接收 JSON 中的 `url` 或 `source`，由 PicNest 服务器直接下载远程 HTTP/HTTPS 媒体。支持 Bearer API 密钥或网页登录会话；接口立即返回 `202` 和任务对象，客户端应使用 `GET /api/remote-imports/:id` 轮询状态。',
+    '',
+    markdownCodeBlock('bash', remoteImportCurlExample(baseUrl)),
+    '',
+    '`category` 仅在最终识别为视频时使用，`album` 仅在最终识别为图片时使用；`connections` 可选，范围为 1–16。服务端会根据实际图片格式或视频扩展名/MIME 类型自动分流，任务完成后 `result` 返回对应的图片或视频对象。仅允许 HTTP/HTTPS，默认拒绝本机、局域网和其他私有地址。',
     '',
     '## 图片对象完整响应',
     '',
@@ -420,6 +445,7 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
           <a href="#api-doc-overview">基本约定</a>
           <a href="#api-doc-auth">身份认证</a>
           <a href="#api-doc-upload">上传图片</a>
+          <a href="#api-doc-remote-import">远程导入</a>
           <a href="#api-doc-response">图片对象</a>
           <a href="#api-doc-video-upload">上传视频</a>
           <a href="#api-doc-video-response">视频对象</a>
@@ -466,6 +492,13 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
             <p><code>POST /api/videos</code> 单次最多上传 10 个视频，单个大小上限由服务端环境变量 <code>PICNEST_VIDEO_MAX_MB</code> 控制，默认 500 MB。支持 <code>mp4</code>、<code>webm</code>、<code>mov</code>、<code>m4v</code>、<code>avi</code>、<code>mkv</code>；可选 <code>category</code> 指定视频分类，未填写时使用默认分类，也兼容旧字段 <code>album</code>。</p>
             <ApiCode>{videoUploadCurlExample(baseUrl)}</ApiCode>
             <p>视频不会经过图片处理引擎，服务端会校验扩展名与请求 MIME 类型，并按原始字节保存。返回对象包含直链、Markdown、BBCode 和 HTML5 video 引用，以及 <code>category</code> 分类字段；视频媒体地址支持 <code>Range</code> 请求，适合浏览器按需加载和拖动进度。</p>
+          </section>
+
+          <section id="api-doc-remote-import">
+            <h3>远程导入</h3>
+            <p><code>POST /api/remote-imports</code> 接收 JSON 中的 <code>url</code> 或 <code>source</code>，由 PicNest 服务器直接下载远程 HTTP/HTTPS 媒体。支持 Bearer API 密钥或网页登录会话；接口立即返回 <code>202</code> 和任务对象，客户端应使用 <code>GET /api/remote-imports/:id</code> 轮询状态。</p>
+            <ApiCode>{remoteImportCurlExample(baseUrl)}</ApiCode>
+            <p><code>category</code> 仅在最终识别为视频时使用，<code>album</code> 仅在最终识别为图片时使用；<code>connections</code> 可选，范围为 1–16。服务端会根据实际图片格式或视频扩展名/MIME 类型自动分流，任务完成后 <code>result</code> 返回对应的图片或视频对象。仅允许 HTTP/HTTPS，默认拒绝本机、局域网和其他私有地址。</p>
           </section>
 
           <section id="api-doc-video-response">

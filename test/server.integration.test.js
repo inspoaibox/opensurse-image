@@ -137,6 +137,18 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
     body: JSON.stringify({ label: '管理员自动化' }),
   })
   assert.equal(adminApiKey.response.status, 201)
+  const bearerRemoteImport = await requestJson(`${baseUrl}/api/remote-imports`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminApiKey.body.secret}` },
+    body: JSON.stringify({ url: 'file:///etc/passwd', category: '远程视频', connections: 8 }),
+  })
+  assert.equal(bearerRemoteImport.response.status, 400)
+  assert.match(bearerRemoteImport.body.message, /HTTP 或 HTTPS/)
+  const bearerMissingRemoteImport = await requestJson(`${baseUrl}/api/remote-imports/not-a-real-task`, {
+    headers: { Authorization: `Bearer ${adminApiKey.body.secret}` },
+  })
+  assert.equal(bearerMissingRemoteImport.response.status, 404)
+  assert.equal(bearerMissingRemoteImport.body.message, '远程导入任务不存在')
   const adminBearerUsers = await requestJson(`${baseUrl}/api/users`, { headers: { Authorization: `Bearer ${adminApiKey.body.secret}` } })
   assert.equal(adminBearerUsers.response.status, 403)
   const adminBearerSettings = await requestJson(`${baseUrl}/api/settings/guest-upload`, {

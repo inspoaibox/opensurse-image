@@ -1686,7 +1686,7 @@ app.post('/api/videos', authenticate, videoUpload.array('files', 10), async (req
   res.status(201).json(created)
 })
 
-app.post('/api/remote-imports', authenticate, requireSessionAuth, (req, res) => {
+app.post('/api/remote-imports', authenticate, (req, res) => {
   const activeCount = Array.from(remoteImportTasks.values())
     .filter((task) => task.ownerId === req.user.id && activeRemoteTask(task)).length
   if (activeCount >= remoteMaxActive) {
@@ -1740,7 +1740,7 @@ app.post('/api/remote-imports', authenticate, requireSessionAuth, (req, res) => 
   res.status(202).json(publicRemoteTask(task))
 })
 
-app.get('/api/remote-imports/:id', authenticate, requireSessionAuth, (req, res) => {
+app.get('/api/remote-imports/:id', authenticate, (req, res) => {
   const task = remoteImportTasks.get(req.params.id)
   if (!task || task.ownerId !== req.user.id) return res.status(404).json({ message: '远程导入任务不存在' })
   res.json(publicRemoteTask(task))
