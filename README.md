@@ -1026,7 +1026,19 @@ curl -X POST https://img.example.com/api/images \
 
 图片对象包含 `filename`、绝对 `url`、相对 `path`、`type`、`format`、`extension`、`mimeType`、持久化的 `processing` 处理结果，以及 `links.direct`、`links.markdown`、`links.bbcode`、`links.html` 四种完整引用。生产环境应配置 `PICNEST_PUBLIC_URL=https://img.example.com`，避免反向代理环境下返回内部地址。
 
-视频库通过独立接口管理视频，视频与图片共用用户配额和存储服务。支持 `mp4`、`webm`、`mov`、`m4v`、`avi`、`mkv`，服务端按原始字节保存，不经过 Sharp 图片处理。视频直链公开可读取，响应支持 `Accept-Ranges: bytes`；浏览器可以使用 `Range` 请求进行按需加载、进度拖动和断点播放。视频对象同样返回 `filename`、`url`、`path`、`type`、`format`、`extension`、`mimeType`、`size`、`links` 和 `createdAt`，并提供 HTML5 `<video>` 引用。
+视频上传使用独立的 `/api/videos` 接口，Bearer API 密钥的认证方式与图片一致：
+
+```bash
+curl -X POST https://img.example.com/api/videos \
+  -H "Authorization: Bearer pn_live_xxx" \
+  -F "files=@demo.mp4" \
+  -F "files=@screen-recording.webm" \
+  -F "category=产品演示"
+```
+
+视频上传始终返回视频对象数组，即使只上传一个文件；单次最多 10 个，单个大小上限由 `PICNEST_VIDEO_MAX_MB` 控制，默认 500 MB。`GET /api/videos` 返回列表，`GET /api/videos/:id` 返回单个对象，`PATCH /api/videos/:id` 支持修改 `name`、`category` 和 `starred`，`POST /api/videos/bulk-delete` 支持按 ID 数组批量删除。分类通过 `GET/POST /api/video-categories` 管理，并可用 `PATCH /api/video-categories/:id/default` 设置默认分类。
+
+媒体库将图片相册与视频分类分开管理。视频通过独立接口保存，视频与图片共用用户配额和存储服务。支持 `mp4`、`webm`、`mov`、`m4v`、`avi`、`mkv`，服务端按原始字节保存，不经过 Sharp 图片处理。视频可以在媒体库的“视频”页按分类筛选、上传、播放、分享、收藏和删除；分类支持创建、设置默认分类，以及在视频详情中重新归类。视频直链公开可读取，响应支持 `Accept-Ranges: bytes`；浏览器可以使用 `Range` 请求进行按需加载、进度拖动和断点播放。视频对象同样返回 `filename`、`url`、`path`、`type`、`format`、`extension`、`mimeType`、`size`、`category`、`links` 和 `createdAt`，并提供 HTML5 `<video>` 引用。旧客户端使用的 `album` 字段继续作为兼容别名。
 
 系统图片处理默认开启、默认保持原格式。管理员可在“系统设置 → 图片处理”中设置输出为 JPEG、PNG、WebP 或 AVIF，调整 1–100 的转换质量，并配置 EXIF 自动旋转和元数据清理。
 
@@ -1058,8 +1070,10 @@ API 上传可使用 multipart 字段 `format`、`quality`、`autoOrient`、`stri
 | `POST` | `/api/images/bulk-delete` | 图片所有者 | 批量删除 |
 | `GET/POST` | `/api/videos` | 用户/API 密钥 | 视频列表或上传，单次最多 10 个 |
 | `GET` | `/api/videos/:id` | 视频所有者 | 读取单个视频的完整对象与引用地址 |
-| `PATCH/DELETE` | `/api/videos/:id` | 视频所有者 | 修改名称或收藏状态、删除视频 |
+| `PATCH/DELETE` | `/api/videos/:id` | 视频所有者 | 修改名称、分类或收藏状态、删除视频 |
 | `POST` | `/api/videos/bulk-delete` | 视频所有者 | 批量删除视频 |
+| `GET/POST` | `/api/video-categories` | 用户/API 密钥 | 视频分类列表或创建 |
+| `PATCH` | `/api/video-categories/:id/default` | 分类所有者 | 设置默认上传视频分类 |
 | `GET/POST` | `/api/albums` | 用户/API 密钥 | 相册列表或创建 |
 | `PATCH` | `/api/albums/:id/default` | 相册所有者 | 设置默认相册 |
 | `GET/POST` | `/api/api-keys` | 用户会话 | 查看密钥列表或创建新密钥 |

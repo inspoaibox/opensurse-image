@@ -206,6 +206,73 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.match(video.url, /\/media\/video\/[^/]+\/.+\.mp4$/)
   assert.equal(video.links.html.includes('<video controls'), true)
 
+  const initialVideoCategories = await requestJson(`${baseUrl}/api/video-categories`, { headers: { Cookie: memberCookie } })
+  assert.equal(initialVideoCategories.response.status, 200)
+  assert.equal(initialVideoCategories.body.length, 1)
+  assert.equal(initialVideoCategories.body[0].name, '视频')
+  assert.equal(initialVideoCategories.body[0].isDefault, true)
+  assert.equal(initialVideoCategories.body[0].videoCount, 1)
+
+  const createdVideoCategory = await requestJson(`${baseUrl}/api/video-categories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: memberCookie },
+    body: JSON.stringify({ name: '产品演示' }),
+  })
+  assert.equal(createdVideoCategory.response.status, 201)
+  assert.equal(createdVideoCategory.body.name, '产品演示')
+  assert.equal(createdVideoCategory.body.isDefault, false)
+
+  const duplicateVideoCategory = await requestJson(`${baseUrl}/api/video-categories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: memberCookie },
+    body: JSON.stringify({ name: '产品演示' }),
+  })
+  assert.equal(duplicateVideoCategory.response.status, 409)
+
+  const categorizedVideoForm = new FormData()
+  categorizedVideoForm.append('files', new Blob([videoBytes], { type: 'video/mp4' }), '分类视频.mp4')
+  categorizedVideoForm.append('category', '产品演示')
+  const categorizedVideoUpload = await requestJson(`${baseUrl}/api/videos`, { method: 'POST', headers: { Cookie: memberCookie }, body: categorizedVideoForm })
+  assert.equal(categorizedVideoUpload.response.status, 201)
+  const categorizedVideo = categorizedVideoUpload.body[0]
+  assert.equal(categorizedVideo.category, '产品演示')
+
+  const defaultVideoCategory = await requestJson(`${baseUrl}/api/video-categories/${createdVideoCategory.body.id}/default`, {
+    method: 'PATCH',
+    headers: { Cookie: memberCookie },
+  })
+  assert.equal(defaultVideoCategory.response.status, 200)
+  assert.equal(defaultVideoCategory.body.isDefault, true)
+
+  const defaultCategorizedVideoForm = new FormData()
+  defaultCategorizedVideoForm.append('files', new Blob([videoBytes], { type: 'video/mp4' }), '默认分类视频.mp4')
+  const defaultCategorizedVideoUpload = await requestJson(`${baseUrl}/api/videos`, { method: 'POST', headers: { Cookie: memberCookie }, body: defaultCategorizedVideoForm })
+  assert.equal(defaultCategorizedVideoUpload.response.status, 201)
+  const defaultCategorizedVideo = defaultCategorizedVideoUpload.body[0]
+  assert.equal(defaultCategorizedVideo.category, '产品演示')
+
+  const movedVideo = await requestJson(`${baseUrl}/api/videos/${video.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: memberCookie },
+    body: JSON.stringify({ category: '产品演示' }),
+  })
+  assert.equal(movedVideo.response.status, 200)
+  assert.equal(movedVideo.body.category, '产品演示')
+
+  const categorizedVideoList = await requestJson(`${baseUrl}/api/video-categories`, { headers: { Cookie: memberCookie } })
+  assert.equal(categorizedVideoList.response.status, 200)
+  const productCategory = categorizedVideoList.body.find((category) => category.name === '产品演示')
+  const legacyVideoCategory = categorizedVideoList.body.find((category) => category.name === '视频')
+  assert.equal(productCategory.isDefault, true)
+  assert.equal(productCategory.videoCount, 3)
+  assert.equal(productCategory.storageUsed, videoBytes.length * 3)
+  assert.equal(legacyVideoCategory.videoCount, 0)
+
+  for (const categorized of [categorizedVideo, defaultCategorizedVideo]) {
+    const categorizedDeletion = await fetch(`${baseUrl}/api/videos/${categorized.id}`, { method: 'DELETE', headers: { Cookie: memberCookie } })
+    assert.equal(categorizedDeletion.status, 204)
+  }
+
   const imageDirectory = path.join(tempDirectory, 'media-images')
   const videoDirectory = path.join(tempDirectory, 'media-videos')
   const localStorageUpdate = await requestJson(`${baseUrl}/api/storage/providers/local`, {
@@ -241,6 +308,11 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.deepEqual(adminVideoList.body, [])
   const crossOwnerVideoRead = await requestJson(`${baseUrl}/api/videos/${video.id}`, { headers: { Cookie: adminCookie } })
   assert.equal(crossOwnerVideoRead.response.status, 404)
+  const crossOwnerVideoCategory = await requestJson(`${baseUrl}/api/video-categories/${createdVideoCategory.body.id}/default`, {
+    method: 'PATCH',
+    headers: { Cookie: adminCookie },
+  })
+  assert.equal(crossOwnerVideoCategory.response.status, 404)
 
   const videoMedia = await fetch(video.url)
   assert.equal(videoMedia.status, 200)
@@ -353,6 +425,21 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   const bearerImages = await requestJson(`${baseUrl}/api/images`, { headers: { Authorization: `Bearer ${apiKey.body.secret}` } })
   assert.equal(bearerImages.response.status, 200)
   assert.equal(bearerImages.body.length, 1)
+  const bearerVideoForm = new FormData()
+  bearerVideoForm.append('files', new Blob([videoBytes], { type: 'video/mp4' }), '开发者视频.mp4')
+  const bearerVideoUpload = await requestJson(`${baseUrl}/api/videos`, { method: 'POST', headers: { Authorization: `Bearer ${apiKey.body.secret}` }, body: bearerVideoForm })
+  assert.equal(bearerVideoUpload.response.status, 201)
+  assert.equal(bearerVideoUpload.body.length, 1)
+  const bearerVideos = await requestJson(`${baseUrl}/api/videos`, { headers: { Authorization: `Bearer ${apiKey.body.secret}` } })
+  assert.equal(bearerVideos.response.status, 200)
+  assert.equal(bearerVideos.body.some((video) => video.id === bearerVideoUpload.body[0].id), true)
+  const bearerVideoDetail = await requestJson(`${baseUrl}/api/videos/${bearerVideoUpload.body[0].id}`, { headers: { Authorization: `Bearer ${apiKey.body.secret}` } })
+  assert.equal(bearerVideoDetail.response.status, 200)
+  const bearerVideoCategories = await requestJson(`${baseUrl}/api/video-categories`, { headers: { Authorization: `Bearer ${apiKey.body.secret}` } })
+  assert.equal(bearerVideoCategories.response.status, 200)
+  assert.equal(bearerVideoCategories.body.length >= 1, true)
+  const bearerVideoDeletion = await fetch(`${baseUrl}/api/videos/${bearerVideoUpload.body[0].id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${apiKey.body.secret}` } })
+  assert.equal(bearerVideoDeletion.status, 204)
   const bearerKeyManagement = await requestJson(`${baseUrl}/api/api-keys`, { headers: { Authorization: `Bearer ${apiKey.body.secret}` } })
   assert.equal(bearerKeyManagement.response.status, 403)
   const bearerStorage = await requestJson(`${baseUrl}/api/storage/providers`, { headers: { Authorization: `Bearer ${apiKey.body.secret}` } })
@@ -376,10 +463,12 @@ test('旧版 SQLite 结构会在启动时自动迁移', async (context) => {
   legacy.exec(`
     CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL, quota INTEGER NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE images (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, name TEXT NOT NULL, filename TEXT, url TEXT NOT NULL, type TEXT NOT NULL, mime_type TEXT NOT NULL, size INTEGER NOT NULL, width INTEGER, height INTEGER, album TEXT NOT NULL, starred INTEGER NOT NULL, views INTEGER NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE videos (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, name TEXT NOT NULL, filename TEXT, storage_provider_id TEXT, storage_key TEXT, url TEXT NOT NULL, type TEXT NOT NULL, mime_type TEXT NOT NULL, size INTEGER NOT NULL, album TEXT NOT NULL, starred INTEGER NOT NULL, views INTEGER NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE albums (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(owner_id, name));
     CREATE TABLE api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, label TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, key_prefix TEXT NOT NULL, created_at TEXT NOT NULL, last_used_at TEXT);
     INSERT INTO users VALUES ('legacy-user', '旧版用户', 'legacy@example.test', 'unused', 'admin', 1073741824, '2025-01-01T00:00:00.000Z');
     INSERT INTO albums VALUES ('legacy-album', 'legacy-user', '未分类', '2025-01-01T00:00:00.000Z');
+    INSERT INTO videos VALUES ('legacy-video', 'legacy-user', '旧视频.mp4', 'legacy-video.mp4', 'local', 'legacy-user/legacy-video.mp4', '/media/video/legacy-video/旧视频.mp4', 'mp4', 'video/mp4', 10, '', 0, 0, '2025-01-01T00:00:00.000Z');
   `)
   legacy.close()
 
@@ -419,5 +508,8 @@ test('旧版 SQLite 结构会在启动时自动迁移', async (context) => {
   assert.equal(columnNames('albums').includes('is_default'), true)
   assert.equal(columnNames('api_keys').includes('secret_encrypted'), true)
   assert.equal(migrated.prepare('SELECT is_default FROM albums WHERE id = ?').get('legacy-album').is_default, 1)
+  assert.equal(columnNames('video_categories').includes('is_default'), true)
+  assert.equal(migrated.prepare('SELECT COUNT(*) AS count FROM video_categories').get().count, 1)
+  assert.equal(migrated.prepare('SELECT album FROM videos WHERE id = ?').get('legacy-video').album, '视频')
   migrated.close()
 })

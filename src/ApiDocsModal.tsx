@@ -33,7 +33,7 @@ const endpointGroups = [
       ['GET', '/api/videos', '列出当前用户的全部视频'],
       ['POST', '/api/videos', '上传 1–10 个视频，multipart/form-data'],
       ['GET', '/api/videos/:id', '获取当前用户的单个视频详情'],
-      ['PATCH', '/api/videos/:id', '修改视频名称或收藏状态'],
+      ['PATCH', '/api/videos/:id', '修改视频名称、分类或收藏状态'],
       ['DELETE', '/api/videos/:id', '删除视频记录与原文件'],
       ['POST', '/api/videos/bulk-delete', '按 ID 数组批量删除视频'],
     ],
@@ -44,6 +44,9 @@ const endpointGroups = [
       ['GET', '/api/albums', '列出当前用户相册'],
       ['POST', '/api/albums', '创建相册'],
       ['PATCH', '/api/albums/:id/default', '设置默认上传相册'],
+      ['GET', '/api/video-categories', '列出视频分类及数量、空间统计'],
+      ['POST', '/api/video-categories', '创建视频分类'],
+      ['PATCH', '/api/video-categories/:id/default', '设置默认上传视频分类'],
       ['GET', '/api/stats', '空间与本月 API 使用统计'],
     ],
   },
@@ -144,6 +147,7 @@ const videoResponseExample = `[
     "mimeType": "video/mp4",
     "size": 5242880,
     "album": "视频",
+    "category": "视频",
     "starred": false,
     "views": 0,
     "links": {
@@ -178,6 +182,8 @@ const videoFields = [
   ['mimeType', '标准 MIME 类型，例如 video/mp4'],
   ['links', '直链、Markdown、BBCode、HTML5 video 完整引用'],
   ['filename', '视频公开文件名；重命名后仍会保持真实视频格式扩展名'],
+  ['category', '视频所属分类；上传和修改时使用，未填写时使用默认分类'],
+  ['album', '兼容旧客户端的分类字段别名'],
   ['views', '通过 PicNest 媒体地址播放或读取时累计的访问次数'],
 ]
 
@@ -206,7 +212,38 @@ const uploadCurlExample = (baseUrl: string) => `curl -X POST "${baseUrl}/api/ima
 const videoUploadCurlExample = (baseUrl: string) => `curl -X POST "${baseUrl}/api/videos" \\
   -H "Authorization: Bearer pn_live_xxx" \\
   -F "files=@demo.mp4" \\
-  -F "files=@screen-recording.webm"`
+  -F "files=@screen-recording.webm" \\
+  -F "category=产品演示"`
+
+const videoManagementCurlExample = (baseUrl: string) => `# 查询视频列表
+curl "${baseUrl}/api/videos" \\
+  -H "Authorization: Bearer pn_live_xxx"
+
+# 修改视频名称、分类或收藏状态
+curl -X PATCH "${baseUrl}/api/videos/video-id" \\
+  -H "Authorization: Bearer pn_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name":"新版演示.mp4","category":"产品演示","starred":true}'
+
+# 批量删除视频
+curl -X POST "${baseUrl}/api/videos/bulk-delete" \\
+  -H "Authorization: Bearer pn_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"ids":["video-id-1","video-id-2"]}'`
+
+const videoCategoryCurlExample = (baseUrl: string) => `# 查询视频分类
+curl "${baseUrl}/api/video-categories" \\
+  -H "Authorization: Bearer pn_live_xxx"
+
+# 创建视频分类
+curl -X POST "${baseUrl}/api/video-categories" \\
+  -H "Authorization: Bearer pn_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name":"产品演示"}'
+
+# 设置默认视频分类
+curl -X PATCH "${baseUrl}/api/video-categories/category-id/default" \\
+  -H "Authorization: Bearer pn_live_xxx"`
 
 const markdownCodeBlock = (language: string, content: string) => `\`\`\`${language}\n${content}\n\`\`\``
 const markdownTableCell = (value: string) => value.replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
@@ -263,11 +300,11 @@ const buildMarkdownDocs = (baseUrl: string) => {
     '',
     '## 上传视频',
     '',
-    '`POST /api/videos` 单次最多上传 10 个视频，单个大小上限由服务端环境变量 `PICNEST_VIDEO_MAX_MB` 控制，默认 500 MB。重复提交 `files` 字段即可批量上传；支持 `mp4`、`webm`、`mov`、`m4v`、`avi`、`mkv`。',
+    '`POST /api/videos` 单次最多上传 10 个视频，单个大小上限由服务端环境变量 `PICNEST_VIDEO_MAX_MB` 控制，默认 500 MB。重复提交 `files` 字段即可批量上传；支持 `mp4`、`webm`、`mov`、`m4v`、`avi`、`mkv`。可选的 `category` 字段指定视频分类；未填写时使用默认视频分类，也兼容旧字段 `album`。',
     '',
     markdownCodeBlock('bash', videoUploadCurlExample(baseUrl)),
     '',
-    '视频不会经过图片处理引擎，服务端会校验扩展名与请求 MIME 类型，并按原始字节保存。返回对象包含可公开访问的直链、Markdown、BBCode 和 HTML5 video 引用。视频媒体地址支持 `Range` 请求，浏览器可以按需加载、拖动进度和断点播放。',
+    '视频不会经过图片处理引擎，服务端会校验扩展名与请求 MIME 类型，并按原始字节保存。返回对象包含可公开访问的直链、Markdown、BBCode 和 HTML5 video 引用，以及 `category` 分类字段。视频媒体地址支持 `Range` 请求，浏览器可以按需加载、拖动进度和断点播放。',
     '',
     '## 图片对象完整响应',
     '',
@@ -296,6 +333,18 @@ const buildMarkdownDocs = (baseUrl: string) => {
     ...videoFields.map(([field, description]) => `| \`${field}\` | ${description} |`),
     '',
     '视频公开地址不要求登录，删除和列表接口仍只允许所有者或其 Bearer 密钥访问。媒体响应支持 `Accept-Ranges: bytes`；请求 `Range: bytes=0-1048575` 时返回 `206 Partial Content`。',
+    '',
+    '## 视频管理',
+    '',
+    '使用 `GET /api/videos` 查询列表，使用 `GET /api/videos/:id` 查询单个视频；`PATCH /api/videos/:id` 可修改 `name`、`category` 和 `starred`，`POST /api/videos/bulk-delete` 可按 ID 数组批量删除。',
+    '',
+    markdownCodeBlock('bash', videoManagementCurlExample(baseUrl)),
+    '',
+    '## 视频分类',
+    '',
+    '`GET /api/video-categories` 返回当前用户的视频分类、默认分类标记、视频数量、占用空间和最近视频封面。`POST /api/video-categories` 创建分类，名称长度为 1–100 个字符，每位用户最多 500 个分类；`PATCH /api/video-categories/:id/default` 设置默认上传分类。视频分类与图片相册独立管理。',
+    '',
+    markdownCodeBlock('bash', videoCategoryCurlExample(baseUrl)),
     '',
     '## 全部接口',
     '',
@@ -373,6 +422,8 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
           <a href="#api-doc-response">图片对象</a>
           <a href="#api-doc-video-upload">上传视频</a>
           <a href="#api-doc-video-response">视频对象</a>
+          <a href="#api-doc-video-management">视频管理</a>
+          <a href="#api-doc-video-categories">视频分类</a>
           <a href="#api-doc-endpoints">全部接口</a>
           <a href="#api-doc-errors">错误与限制</a>
         </aside>
@@ -411,9 +462,9 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
 
           <section id="api-doc-video-upload">
             <h3>上传视频</h3>
-            <p><code>POST /api/videos</code> 单次最多上传 10 个视频，单个大小上限由服务端环境变量 <code>PICNEST_VIDEO_MAX_MB</code> 控制，默认 500 MB。支持 <code>mp4</code>、<code>webm</code>、<code>mov</code>、<code>m4v</code>、<code>avi</code>、<code>mkv</code>。</p>
+            <p><code>POST /api/videos</code> 单次最多上传 10 个视频，单个大小上限由服务端环境变量 <code>PICNEST_VIDEO_MAX_MB</code> 控制，默认 500 MB。支持 <code>mp4</code>、<code>webm</code>、<code>mov</code>、<code>m4v</code>、<code>avi</code>、<code>mkv</code>；可选 <code>category</code> 指定视频分类，未填写时使用默认分类，也兼容旧字段 <code>album</code>。</p>
             <ApiCode>{videoUploadCurlExample(baseUrl)}</ApiCode>
-            <p>视频不会经过图片处理引擎，服务端会校验扩展名与请求 MIME 类型，并按原始字节保存。返回对象包含直链、Markdown、BBCode 和 HTML5 video 引用；视频媒体地址支持 <code>Range</code> 请求，适合浏览器按需加载和拖动进度。</p>
+            <p>视频不会经过图片处理引擎，服务端会校验扩展名与请求 MIME 类型，并按原始字节保存。返回对象包含直链、Markdown、BBCode 和 HTML5 video 引用，以及 <code>category</code> 分类字段；视频媒体地址支持 <code>Range</code> 请求，适合浏览器按需加载和拖动进度。</p>
           </section>
 
           <section id="api-doc-video-response">
@@ -422,6 +473,18 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
             <ApiCode>{videoResponseExample}</ApiCode>
             <div className="api-doc-field-table">{videoFields.map(([field, description]) => <span key={field}><b>{field}</b><small>{description}</small></span>)}</div>
             <p className="api-doc-note">视频公开地址不要求登录，删除和列表接口仍只允许所有者或其 Bearer 密钥访问。媒体响应支持 <code>Accept-Ranges: bytes</code>；请求 <code>Range: bytes=0-1048575</code> 时返回 <code>206 Partial Content</code>。</p>
+          </section>
+
+          <section id="api-doc-video-management">
+            <h3>视频管理</h3>
+            <p>使用 <code>GET /api/videos</code> 查询视频列表，使用 <code>GET /api/videos/:id</code> 查询单个视频；<code>PATCH /api/videos/:id</code> 可修改 <code>name</code>、<code>category</code> 和 <code>starred</code>，<code>POST /api/videos/bulk-delete</code> 可按 ID 数组批量删除。</p>
+            <ApiCode>{videoManagementCurlExample(baseUrl)}</ApiCode>
+          </section>
+
+          <section id="api-doc-video-categories">
+            <h3>视频分类</h3>
+            <p><code>GET /api/video-categories</code> 返回当前用户的视频分类、默认分类标记、视频数量、占用空间和最近视频封面。<code>POST /api/video-categories</code> 创建分类，名称长度为 1–100 个字符，每位用户最多 500 个分类；<code>PATCH /api/video-categories/:id/default</code> 设置默认上传分类。视频分类与图片相册独立管理。</p>
+            <ApiCode>{videoCategoryCurlExample(baseUrl)}</ApiCode>
           </section>
 
           <section id="api-doc-endpoints">

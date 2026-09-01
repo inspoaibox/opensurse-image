@@ -145,6 +145,17 @@ db.exec(`
     UNIQUE(owner_id, name)
   );
 
+  CREATE TABLE IF NOT EXISTS video_categories (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE(owner_id, name)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_video_categories_owner_created ON video_categories(owner_id, created_at ASC);
+
   CREATE TABLE IF NOT EXISTS api_keys (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -392,6 +403,7 @@ const mapVideo = (row, req) => {
     mimeType: videoMimeTypesByFormat[format] || row.mime_type || 'video/mp4',
     size: Number(row.size),
     album: row.album || '视频',
+    category: row.album || '视频',
     starred: Boolean(row.starred),
     views: Number(row.views),
     links: {
@@ -488,7 +500,48 @@ const ensureDefaultAlbum = (ownerId) => {
   return album.name
 }
 
-for (const existingUser of db.prepare('SELECT id FROM users').all()) ensureDefaultAlbum(existingUser.id)
+const ensureVideoCategory = (ownerId, name) => {
+  const normalizedName = String(name || '').trim()
+  if (!validAlbumName(normalizedName)) return null
+  db.prepare('INSERT OR IGNORE INTO video_categories (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)')
+    .run(crypto.randomUUID(), ownerId, normalizedName, new Date().toISOString())
+  return normalizedName
+}
+
+const ensureDefaultVideoCategory = (ownerId) => {
+  let category = db.prepare(`
+    SELECT id, name FROM video_categories WHERE owner_id = ?
+    ORDER BY is_default DESC, CASE WHEN name = '视频' THEN 0 ELSE 1 END, created_at ASC, id ASC LIMIT 1
+  `).get(ownerId)
+  if (!category) {
+    category = { id: crypto.randomUUID(), name: '视频' }
+    db.prepare('INSERT INTO video_categories (id, owner_id, name, is_default, created_at) VALUES (?, ?, ?, 1, ?)')
+      .run(category.id, ownerId, category.name, new Date().toISOString())
+    return category.name
+  }
+
+  db.prepare('UPDATE video_categories SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END WHERE owner_id = ?')
+    .run(category.id, ownerId)
+  return category.name
+}
+
+const ensureVideoCategories = (ownerId) => {
+  const defaultName = ensureDefaultVideoCategory(ownerId)
+  db.prepare(`
+    UPDATE videos SET album = ?
+    WHERE owner_id = ? AND (album IS NULL OR TRIM(album) = '')
+  `).run(defaultName, ownerId)
+  for (const row of db.prepare('SELECT DISTINCT album AS name FROM videos WHERE owner_id = ?').all(ownerId)) {
+    ensureVideoCategory(ownerId, row.name)
+  }
+  return defaultName
+}
+
+for (const existingUser of db.prepare('SELECT id FROM users').all()) {
+  ensureDefaultAlbum(existingUser.id)
+  ensureVideoCategories(existingUser.id)
+}
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_video_categories_one_default_per_owner ON video_categories(owner_id) WHERE is_default = 1')
 
 const getCurrentMonth = () => {
   const now = new Date()
@@ -587,6 +640,7 @@ const createUser = ({ name, email, password, role, quota, storageProviderId = nu
   db.prepare('INSERT INTO users (id, name, email, password_hash, role, quota, storage_provider_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
     .run(id, name.trim(), safeEmail(email), passwordHash, role, storageQuota, storageProviderId, createdAt)
   ensureDefaultAlbum(id)
+  ensureDefaultVideoCategory(id)
   return mapUser(db.prepare('SELECT * FROM users WHERE id = ?').get(id))
 }
 
@@ -777,7 +831,7 @@ const persistUploadedFiles = async ({ files, user, album, request, guestUploaded
   }
 }
 
-const persistUploadedVideos = async ({ files, user, request }) => {
+const persistUploadedVideos = async ({ files, user, request, category }) => {
   const providerId = storageManager.getUploadProviderId(user.storageProviderId)
   const stored = []
   let reservedBytes = 0
@@ -820,7 +874,7 @@ const persistUploadedVideos = async ({ files, user, request }) => {
           type: format,
           mimeType: videoMimeTypesByFormat[format] || file.mimetype || 'application/octet-stream',
           size: file.size,
-          album: '视频',
+          album: category || '视频',
           createdAt: new Date().toISOString(),
         }
         insert.run(video)
@@ -1278,10 +1332,18 @@ app.get('/api/videos/:id', authenticate, (req, res) => {
 
 app.post('/api/videos', authenticate, videoUpload.array('files', 10), async (req, res) => {
   if (!req.files?.length) return res.status(400).json({ message: '请选择需要上传的视频' })
+  const requestedCategory = String(req.body.category || req.body.album || '').trim()
+  if (requestedCategory && !validAlbumName(requestedCategory)) {
+    cleanupPendingFiles(req.files)
+    return res.status(400).json({ message: '视频分类名称需要 1 到 100 个字符' })
+  }
+  const category = requestedCategory || ensureDefaultVideoCategory(req.user.id)
+  ensureVideoCategory(req.user.id, category)
   const created = await persistUploadedVideos({
     files: req.files,
     user: req.user,
     request: req,
+    category,
   })
   res.status(201).json(created)
 })
@@ -1290,11 +1352,19 @@ app.patch('/api/videos/:id', authenticate, (req, res) => {
   const video = db.prepare('SELECT * FROM videos WHERE id = ? AND owner_id = ?').get(req.params.id, req.user.id)
   if (!video) return res.status(404).json({ message: '视频不存在' })
   const name = Object.hasOwn(req.body, 'name') ? String(req.body.name).trim() : video.name
+  const requestedCategory = Object.hasOwn(req.body, 'category')
+    ? String(req.body.category || '').trim()
+    : Object.hasOwn(req.body, 'album')
+      ? String(req.body.album || '').trim()
+      : video.album || ensureDefaultVideoCategory(req.user.id)
+  const category = requestedCategory || ensureDefaultVideoCategory(req.user.id)
   const starred = Object.hasOwn(req.body, 'starred') ? (req.body.starred ? 1 : 0) : video.starred
   if (!validImageName(name)) return res.status(400).json({ message: '视频名称需要 1 到 255 个字符' })
+  if (!validAlbumName(category)) return res.status(400).json({ message: '视频分类名称需要 1 到 100 个字符' })
   if (Object.hasOwn(req.body, 'starred') && typeof req.body.starred !== 'boolean') return res.status(400).json({ message: 'starred 必须是布尔值' })
-  db.prepare('UPDATE videos SET name = ?, starred = ? WHERE id = ? AND owner_id = ?')
-    .run(name, starred, req.params.id, req.user.id)
+  ensureVideoCategory(req.user.id, category)
+  db.prepare('UPDATE videos SET name = ?, album = ?, starred = ? WHERE id = ? AND owner_id = ?')
+    .run(name, category, starred, req.params.id, req.user.id)
   res.json(mapVideo(db.prepare('SELECT * FROM videos WHERE id = ?').get(req.params.id), req))
 })
 
@@ -1356,6 +1426,57 @@ app.post('/api/images/bulk-delete', authenticate, async (req, res) => {
   const owned = db.prepare('SELECT * FROM images WHERE owner_id = ?').all(req.user.id).filter((image) => ids.has(image.id))
   for (const image of owned) await removeOwnedImage(image, req.user.id)
   res.json({ deleted: owned.length })
+})
+
+app.get('/api/video-categories', authenticate, (req, res) => {
+  ensureVideoCategories(req.user.id)
+  const rows = db.prepare(`
+    SELECT video_categories.id, video_categories.name, video_categories.is_default, video_categories.created_at,
+      COUNT(videos.id) AS video_count, COALESCE(SUM(videos.size), 0) AS storage_used,
+      (SELECT url FROM videos cover WHERE cover.owner_id = video_categories.owner_id AND cover.album = video_categories.name ORDER BY cover.created_at DESC LIMIT 1) AS cover
+    FROM video_categories
+    LEFT JOIN videos ON videos.owner_id = video_categories.owner_id AND videos.album = video_categories.name
+    WHERE video_categories.owner_id = ?
+    GROUP BY video_categories.id
+    ORDER BY video_categories.is_default DESC, video_categories.created_at ASC
+  `).all(req.user.id)
+  res.json(rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    isDefault: Boolean(row.is_default),
+    createdAt: row.created_at,
+    videoCount: Number(row.video_count),
+    storageUsed: Number(row.storage_used),
+    cover: row.cover ? absolutePublicUrl(row.cover, req) : null,
+  })))
+})
+
+app.post('/api/video-categories', authenticate, (req, res) => {
+  const name = String(req.body.name || '').trim()
+  if (!validAlbumName(name)) return res.status(400).json({ message: '视频分类名称需要 1 到 100 个字符' })
+  if (db.prepare('SELECT COUNT(*) AS count FROM video_categories WHERE owner_id = ?').get(req.user.id).count >= 500) {
+    return res.status(409).json({ message: '每位用户最多创建 500 个视频分类' })
+  }
+  try {
+    const category = { id: crypto.randomUUID(), name, createdAt: new Date().toISOString() }
+    db.prepare('INSERT INTO video_categories (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)')
+      .run(category.id, req.user.id, name, category.createdAt)
+    res.status(201).json({ ...category, isDefault: false, videoCount: 0, storageUsed: 0, cover: null })
+  } catch (error) {
+    if (String(error.message).includes('UNIQUE')) return res.status(409).json({ message: '视频分类名称已经存在' })
+    throw error
+  }
+})
+
+app.patch('/api/video-categories/:id/default', authenticate, (req, res) => {
+  const category = db.prepare('SELECT id, name FROM video_categories WHERE id = ? AND owner_id = ?').get(req.params.id, req.user.id)
+  if (!category) return res.status(404).json({ message: '视频分类不存在' })
+  const transaction = db.transaction(() => {
+    db.prepare('UPDATE video_categories SET is_default = 0 WHERE owner_id = ?').run(req.user.id)
+    db.prepare('UPDATE video_categories SET is_default = 1 WHERE id = ? AND owner_id = ?').run(category.id, req.user.id)
+  })
+  transaction()
+  res.json({ id: category.id, name: category.name, isDefault: true })
 })
 
 app.get('/api/albums', authenticate, (req, res) => {

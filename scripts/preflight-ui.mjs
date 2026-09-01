@@ -121,13 +121,14 @@ try {
   await page.getByText('EXIF 与原始元数据').waitFor()
   await page.getByRole('button', { name: '关闭大图查看' }).click()
 
-  await page.getByRole('button', { name: '视频库' }).click()
-  await page.getByRole('heading', { name: '视频库', exact: true }).waitFor()
+  await page.getByRole('button', { name: '媒体库' }).click()
+  await page.getByRole('heading', { name: '媒体库', exact: true }).waitFor()
+  await page.getByRole('tab', { name: '视频' }).click()
   await page.getByRole('button', { name: '选择视频' }).waitFor()
   await page.getByText('视频库还是空的').waitFor()
+  await page.screenshot({ path: path.join(outputDirectory, 'desktop-media-videos.png'), fullPage: true })
 
-  await page.getByRole('button', { name: '相册' }).click()
-  await page.getByRole('heading', { name: '相册', exact: true }).waitFor()
+  await page.getByRole('tab', { name: '相册' }).click()
   assert.equal(await page.getByText('默认相册').count() > 0, true)
 
   await page.getByRole('button', { name: '成员管理' }).click()
@@ -141,11 +142,16 @@ try {
 
   await page.getByRole('button', { name: '开发者' }).click()
   await page.getByRole('heading', { name: '开发者', exact: true }).waitFor()
+  await page.getByRole('heading', { name: '让图片和视频进入你的工作流', exact: true }).waitFor()
+  assert.equal(await page.getByText('/api/videos', { exact: true }).count() > 0, true)
   await page.getByPlaceholder('密钥名称，例如：PicGo、生产服务器').fill('UI 验收')
   await page.getByRole('button', { name: '创建密钥' }).click()
   await page.getByText('UI 验收').waitFor()
   await page.getByRole('button', { name: '阅读 API 文档' }).click()
   await page.getByRole('heading', { name: 'API 文档' }).waitFor()
+  await page.getByRole('heading', { name: '上传视频', exact: true }).waitFor()
+  await page.getByRole('heading', { name: '视频管理', exact: true }).waitFor()
+  await page.getByRole('heading', { name: '视频分类', exact: true }).waitFor()
   await page.getByRole('button', { name: '关闭 API 文档' }).click()
 
   await page.getByRole('button', { name: '系统设置' }).click()
@@ -162,6 +168,12 @@ try {
   const viewportMetrics = await page.evaluate(() => ({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth }))
   assert.equal(viewportMetrics.scrollWidth <= viewportMetrics.width + 1, true, `移动端出现横向溢出：${JSON.stringify(viewportMetrics)}`)
   await page.screenshot({ path: path.join(outputDirectory, 'mobile-workbench.png'), fullPage: true })
+  await page.getByRole('button', { name: '媒体库' }).click()
+  await page.getByRole('tab', { name: '视频' }).click()
+  await page.getByRole('button', { name: '选择视频' }).waitFor()
+  const mobileMediaMetrics = await page.evaluate(() => ({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth }))
+  assert.equal(mobileMediaMetrics.scrollWidth <= mobileMediaMetrics.width + 1, true, `移动媒体库出现横向溢出：${JSON.stringify(mobileMediaMetrics)}`)
+  await page.screenshot({ path: path.join(outputDirectory, 'mobile-media-videos.png'), fullPage: true })
 
   await page.setViewportSize({ width: 768, height: 1024 })
   await page.getByRole('button', { name: '系统设置', exact: true }).click()
@@ -187,7 +199,7 @@ try {
   assert.deepEqual(pageErrors, [])
   assert.deepEqual(unexpectedHttpErrors, [])
 
-  console.log(JSON.stringify({ ok: true, browser: executablePath, screenshots: [path.join(outputDirectory, 'mobile-login.png'), path.join(outputDirectory, 'desktop-workbench.png'), path.join(outputDirectory, 'mobile-workbench.png')] }, null, 2))
+  console.log(JSON.stringify({ ok: true, browser: executablePath, screenshots: [path.join(outputDirectory, 'mobile-login.png'), path.join(outputDirectory, 'desktop-workbench.png'), path.join(outputDirectory, 'desktop-media-videos.png'), path.join(outputDirectory, 'mobile-workbench.png'), path.join(outputDirectory, 'mobile-media-videos.png')] }, null, 2))
 } finally {
   if (browser) await browser.close()
   if (!processOutput.exited) child.kill('SIGTERM')

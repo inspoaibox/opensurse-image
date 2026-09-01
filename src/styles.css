@@ -192,17 +192,43 @@ kbd { border: 1px solid #dfe5e0; background: white; color: #99a39f; padding: 2px
 .card-skeleton small { width: 45%; margin-top: 6px; }
 @keyframes shimmer { to { background-position-x: -200%; } }
 
-.gallery-page, .albums-page, .developer-page { display: flex; flex-direction: column; gap: 18px; }
+.gallery-page, .albums-page, .developer-page, .media-library-page { display: flex; flex-direction: column; gap: 18px; }
+.media-library-tabs { display: inline-flex; align-self: flex-start; padding: 4px; gap: 3px; border: 1px solid #dfe7e2; border-radius: 10px; background: #f2f5f2; }
+.media-library-tabs button { min-width: 110px; height: 38px; padding: 0 15px; border: 0; border-radius: 7px; background: transparent; color: #71817b; display: inline-flex; align-items: center; justify-content: center; gap: 7px; font-size: 14px; cursor: pointer; }
+.media-library-tabs button:hover { color: #3e6f66; }
+.media-library-tabs button.active { background: white; color: #2e655b; box-shadow: 0 2px 8px rgba(41,83,73,.08); font-weight: 600; }
 .video-library-page { display: flex; flex-direction: column; gap: 18px; }
+.video-category-panel { padding: 17px; }
+.video-category-chips { margin-top: 15px; display: flex; flex-wrap: wrap; gap: 8px; }
+.video-category-chip-wrap { min-width: 0; display: inline-flex; align-items: stretch; border: 1px solid #dce6e0; border-radius: 9px; background: #fbfdfb; overflow: hidden; }
+.video-category-chip-wrap.active { border-color: #9fc2b6; background: #edf7f1; box-shadow: 0 0 0 2px rgba(79,131,121,.08); }
+.video-category-chip { min-width: 0; height: 36px; padding: 0 10px; border: 0; background: transparent; color: #62756e; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.video-category-chip:hover, .video-category-chip-wrap.active .video-category-chip { color: #356b60; }
+.video-category-chip span { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.video-category-chip em { min-width: 20px; height: 20px; padding: 0 5px; border-radius: 7px; background: #edf2ee; color: #82918b; display: inline-grid; place-items: center; font-size: 12px; font-style: normal; }
+.video-category-default { width: 31px; border: 0; border-left: 1px solid #e4ebe6; background: transparent; color: #9aa9a3; display: grid; place-items: center; cursor: pointer; }
+.video-category-default:hover { background: #f5faf7; color: #4a7e72; }
+.video-category-default.active { color: #d0934f; cursor: default; }
+.video-category-select { min-width: min(310px, 100%); min-height: 38px; margin-top: 2px; padding: 0 10px; border: 1px solid #dce6e0; border-radius: 9px; color: #6f817a; display: flex; align-items: center; gap: 7px; font-size: 13px; }
+.video-category-select select { min-width: 0; flex: 1; height: 34px; border: 0; outline: 0; background: transparent; color: #4e655e; font-size: 14px; }
+.video-detail-category { margin-top: 15px; display: flex; align-items: center; gap: 10px; color: #7a8a84; font-size: 13px; }
+.video-detail-category select { min-width: 150px; height: 34px; border: 1px solid #dfe7e2; border-radius: 8px; padding: 0 9px; background: white; color: #506760; outline: 0; }
 .video-upload-panel { min-height: 230px; padding: 30px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; border: 1.5px dashed #b8d0c6; background: #fbfdfb; transition: .2s ease; }
 .video-upload-panel.dragging { background: #eef7f2; border-color: #4e8b7f; transform: scale(.995); }
 .video-upload-icon { width: 54px; height: 54px; border-radius: 15px; display: grid; place-items: center; color: #4b6e9c; background: #eaf1f8; }
 .video-upload-panel h2 { margin: 0; color: #2c4843; text-align: center; font-size: 20px; }
 .video-upload-panel p { margin: 5px 0 0; color: #87938f; text-align: center; font-size: 14px; }
-.video-upload-progress { width: min(430px, 90%); display: flex; align-items: center; gap: 10px; }
-.video-upload-progress > div { flex: 1; height: 7px; overflow: hidden; border-radius: 20px; background: #e7eee9; }
-.video-upload-progress i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #527aa3, #7ea6cc); transition: width .18s; }
-.video-upload-progress b { min-width: 38px; color: #527aa3; font-size: 14px; }
+.video-upload-progress { width: min(520px, 92%); display: flex; flex-direction: column; gap: 8px; }
+.video-upload-progress-heading { display: flex; align-items: center; justify-content: space-between; color: #527aa3; font-size: 14px; }
+.video-upload-progress-heading span, .video-upload-progress-meta span { display: inline-flex; align-items: center; gap: 5px; }
+.video-upload-progress-heading b { color: #527aa3; font-size: 15px; }
+.video-upload-progress-track { width: 100%; height: 8px; overflow: hidden; border-radius: 20px; background: #e7eee9; }
+.video-upload-progress-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #527aa3, #7ea6cc); transition: width .18s ease; }
+.video-upload-progress-meta { display: flex; justify-content: space-between; gap: 10px; color: #87938f; font-size: 12px; }
+.video-upload-progress-meta span:last-child { text-align: right; }
+.video-upload-progress.stalled .video-upload-progress-track i { background: #d0934f; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .video-toolbar { min-height: 63px; padding: 11px; display: flex; gap: 9px; align-items: center; }
 .video-toolbar select { height: 39px; min-width: 135px; border-radius: 9px; border: 1px solid #e0e5e1; background: #fff; padding: 0 10px; color: #56635f; font-size: 15px; outline: none; }
 .video-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
@@ -558,6 +584,7 @@ kbd { border: 1px solid #dfe5e0; background: white; color: #99a39f; padding: 2px
   .auth-mobile-brand { display: flex; align-items: center; gap: 10px; color: var(--ink); }
   .auth-mobile-brand > span:last-child { display: flex; align-items: baseline; gap: 7px; }.auth-mobile-brand b { font-size: 20px; }.auth-mobile-brand small { color: #81928d; font-size: 14px; }
   .gallery-toolbar { height: auto; flex-wrap: wrap; }.gallery-search { flex: 1 1 100%; }.gallery-toolbar select { flex: 1; }
+  .video-toolbar { height: auto; flex-wrap: wrap; }.video-toolbar .gallery-search { flex: 1 1 100%; }.video-toolbar select { flex: 1; min-width: 0; }
   .gallery-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .video-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .api-hero { grid-template-columns: minmax(0, 1fr); gap: 22px; }
@@ -571,6 +598,9 @@ kbd { border: 1px solid #dfe5e0; background: white; color: #99a39f; padding: 2px
   .page-content { padding: 16px 13px 30px; }
   .gallery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .video-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .video-upload-progress { width: 100%; }
+  .video-upload-progress-meta { align-items: flex-start; flex-direction: column; }
+  .video-upload-progress-meta span:last-child { text-align: left; }
   .gallery-summary { align-items: flex-start; flex-direction: column; gap: 10px; }.bulk-actions { width: 100%; flex-wrap: wrap; }
   .image-list { overflow-x: auto; }.image-list-row { min-width: 760px; }
   .team-overview { padding: 22px 18px; }.team-stats { gap: 0; }.team-stats > span { min-width: 0; flex: 1; padding: 0 6px; }.team-stats b { font-size: 18px; }
@@ -603,6 +633,7 @@ kbd { border: 1px solid #dfe5e0; background: white; color: #99a39f; padding: 2px
   .api-doc-endpoint-group > div > span { grid-template-columns: 88px minmax(0, 1fr); gap: 5px 9px; padding: 10px; }
   .api-doc-endpoint-group small { grid-column: 1 / -1; padding-left: 97px; }
   .upload-zone { min-height: 310px; padding-left: 18px; padding-right: 18px; }
+  .video-category-panel .page-action-row { align-items: flex-start; flex-wrap: wrap; gap: 12px; }
   .upload-destination-row, .upload-album-select { width: 100%; }.upload-album-select { min-width: 0; }
   .upload-results-heading { align-items: flex-start; flex-direction: column; }.upload-results-actions { width: 100%; }.upload-results-actions .button { flex: 1; padding: 0 9px; }
   .upload-results-grid { grid-template-columns: minmax(0, 1fr); }

@@ -1,4 +1,4 @@
-export type ViewName = 'dashboard' | 'gallery' | 'videos' | 'albums' | 'users' | 'developer' | 'settings'
+export type ViewName = 'dashboard' | 'gallery' | 'media' | 'users' | 'developer' | 'settings'
 
 export interface User {
   id: string
@@ -22,6 +22,16 @@ export interface AlbumItem {
   isDefault: boolean
   createdAt: string
   imageCount: number
+  storageUsed: number
+  cover: string | null
+}
+
+export interface VideoCategoryItem {
+  id: string
+  name: string
+  isDefault: boolean
+  createdAt: string
+  videoCount: number
   storageUsed: number
   cover: string | null
 }
@@ -115,6 +125,7 @@ export interface VideoItem {
   mimeType: string
   size: number
   album: string
+  category?: string
   starred: boolean
   views: number
   links?: {
