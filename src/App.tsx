@@ -51,7 +51,7 @@ import {
   Video,
   X,
 } from 'lucide-react'
-import type { AlbumItem, ApiKeyItem, ImageItem, ImageMetadata, ImageProcessingSettings, RemoteImportTask, Stats, StorageProviderItem, StorageProviderType, TrafficAnalytics, User, UserSummary, VideoCategoryItem, VideoItem, ViewName } from './types'
+import type { AlbumItem, ApiKeyItem, HotlinkProtectionSettings, ImageItem, ImageMetadata, ImageProcessingSettings, RemoteImportTask, Stats, StorageProviderItem, StorageProviderType, TrafficAnalytics, User, UserSummary, VideoCategoryItem, VideoItem, ViewName } from './types'
 import ApiDocsModal from './ApiDocsModal'
 
 const defaultStats: Stats = {
@@ -69,6 +69,11 @@ const defaultStats: Stats = {
 const defaultAllowedExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg']
 const defaultVideoExtensions = ['mp4', 'webm', 'mov', 'm4v', 'avi', 'mkv']
 const defaultVideoMaxFileSize = 500 * 1024 * 1024
+const defaultHotlinkProtection: HotlinkProtectionSettings = {
+  imageEnabled: true,
+  videoEnabled: true,
+  trustedDomains: [],
+}
 const extensionAccept = (extensions: string[]) => extensions.map((extension) => `.${extension}`).join(',')
 const extensionSummary = (extensions: string[]) => extensions.map((extension) => extension.toUpperCase()).join('、')
 const mediaExtensionAccept = (imageExtensions: string[], videoExtensions: string[]) => [...imageExtensions, ...videoExtensions].map((extension) => `.${extension}`).join(',')
@@ -1812,6 +1817,19 @@ function RenameControl({ name, mediaLabel, onSave, notify }: {
   )
 }
 
+function MediaHotlinkToggle({ enabled, mediaLabel, onChange }: {
+  enabled: boolean
+  mediaLabel: '图片' | '视频'
+  onChange: () => void
+}) {
+  return (
+    <div className="media-hotlink-setting">
+      <span><b>启用{mediaLabel}防盗链</b><small>{enabled ? '已开启：外部网站引用会按系统防盗链策略校验' : '已关闭：允许外部网站直接引用此媒体'}</small></span>
+      <button className={`switch ${enabled ? 'active' : ''}`} onClick={onChange} aria-label={`启用${mediaLabel}防盗链`} aria-pressed={enabled}><i /></button>
+    </div>
+  )
+}
+
 function VideoShareModal({ video, categories, onClose, onPatch, onDelete, notify }: {
   video: VideoItem
   categories: VideoCategoryItem[]
@@ -1854,6 +1872,7 @@ function VideoShareModal({ video, categories, onClose, onPatch, onDelete, notify
           <div className="share-heading"><span><small>{videoCategoryName(video)}</small><RenameControl name={video.name} mediaLabel="视频" onSave={(name) => onPatch(video.id, { name })} notify={notify} /><p>{video.type} · {formatBytes(video.size)} · {formatDate(video.createdAt)}</p></span><button className={video.starred ? 'starred' : ''} onClick={() => void onPatch(video.id, { starred: !video.starred })} aria-label={video.starred ? '取消收藏' : '收藏视频'}><Star size={18} fill={video.starred ? 'currentColor' : 'none'} /></button></div>
           <label className="video-detail-category"><span>所属分类</span><select value={videoCategoryName(video)} onChange={(event) => void onPatch(video.id, { category: event.target.value })}>{categories.map((category) => <option key={category.id} value={category.name}>{category.name}</option>)}</select></label>
           <div className="video-share-note"><Video size={15} /> 支持浏览器在线播放，分享直链后可用于网页、论坛或第三方播放器。</div>
+          <MediaHotlinkToggle enabled={video.hotlinkProtectionEnabled !== false} mediaLabel="视频" onChange={() => void onPatch(video.id, { hotlinkProtectionEnabled: video.hotlinkProtectionEnabled === false })} />
           <div className="link-list"><VideoReferenceFields video={video} notify={notify} /></div>
           <div className="share-footer"><button className="danger-button" onClick={onDelete}><Trash2 size={16} /> 删除视频</button><a className="button button-secondary" href={video.url} download><Download size={16} /> 下载视频</a><button className="button button-primary" onClick={() => void copy()}><Link2 size={16} /> 复制直链</button></div>
         </div>
@@ -2380,6 +2399,10 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
   const [imageProcessingLoading, setImageProcessingLoading] = useState(true)
   const [imageProcessingSaving, setImageProcessingSaving] = useState(false)
   const [newAllowedExtension, setNewAllowedExtension] = useState('')
+  const [hotlinkProtection, setHotlinkProtection] = useState<HotlinkProtectionSettings>(defaultHotlinkProtection)
+  const [hotlinkProtectionLoading, setHotlinkProtectionLoading] = useState(true)
+  const [hotlinkProtectionSaving, setHotlinkProtectionSaving] = useState(false)
+  const [newTrustedDomain, setNewTrustedDomain] = useState('')
 
   const loadStorageProviders = useCallback(async () => {
     setStorageLoading(true)
@@ -2409,7 +2432,21 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
     }
   }, [notify, onAllowedExtensionsChange])
 
-  useEffect(() => { void loadStorageProviders(); void loadImageProcessing() }, [loadImageProcessing, loadStorageProviders])
+  const loadHotlinkProtection = useCallback(async () => {
+    setHotlinkProtectionLoading(true)
+    try {
+      const response = await fetch('/api/settings/hotlink-protection')
+      const detail = await response.json().catch(() => ({ message: '防盗链设置加载失败' }))
+      if (!response.ok) throw new Error(detail.message)
+      setHotlinkProtection(detail as HotlinkProtectionSettings)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '防盗链设置加载失败')
+    } finally {
+      setHotlinkProtectionLoading(false)
+    }
+  }, [notify])
+
+  useEffect(() => { void loadStorageProviders(); void loadImageProcessing(); void loadHotlinkProtection() }, [loadHotlinkProtection, loadImageProcessing, loadStorageProviders])
 
   const testStorageProvider = async (provider: StorageProviderItem) => {
     const response = await fetch(`/api/storage/providers/${provider.id}/test`, { method: 'POST' })
@@ -2486,6 +2523,25 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
     onGuestUploadChange(enabled)
     notify(enabled ? '游客上传已开启' : '游客上传已关闭')
   }
+  const saveHotlinkProtection = async () => {
+    if (user.role !== 'admin') return notify('仅管理员可以修改系统防盗链策略')
+    setHotlinkProtectionSaving(true)
+    try {
+      const response = await fetch('/api/settings/hotlink-protection', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(hotlinkProtection),
+      })
+      const detail = await response.json().catch(() => ({ message: '防盗链设置保存失败' }))
+      if (!response.ok) return notify(detail.message)
+      setHotlinkProtection(detail as HotlinkProtectionSettings)
+      notify('防盗链策略已保存，新的媒体请求立即生效')
+    } catch {
+      notify('防盗链设置保存失败，请重试')
+    } finally {
+      setHotlinkProtectionSaving(false)
+    }
+  }
   const renderProcessingToggle = (key: 'enabled' | 'autoOrient' | 'stripMetadata', title: string, description: string) => (
     <div className="toggle-row" key={key}>
       <span><b>{title}</b><small>{description}</small></span>
@@ -2511,6 +2567,18 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
   const removeAllowedExtension = (extension: string) => {
     if (imageProcessing.allowedExtensions.length <= 1) return notify('至少需要保留一种允许上传的文件类型')
     setImageProcessing((current) => ({ ...current, allowedExtensions: current.allowedExtensions.filter((item) => item !== extension) }))
+  }
+  const addTrustedDomain = () => {
+    const domain = newTrustedDomain.trim().toLowerCase().replace(/^[a-z][a-z\d+.-]*:\/\//, '').split(/[/?#]/, 1)[0].replace(/\.$/, '')
+    if (!domain) return notify('请输入可信引用域名')
+    if (hotlinkProtection.trustedDomains.includes(domain)) return notify(`${domain} 已经在可信域名列表中`)
+    if (hotlinkProtection.trustedDomains.length >= 50) return notify('最多可以配置 50 个可信引用域名')
+    setHotlinkProtection((current) => ({ ...current, trustedDomains: [...current.trustedDomains, domain] }))
+    setNewTrustedDomain('')
+  }
+
+  const removeTrustedDomain = (domain: string) => {
+    setHotlinkProtection((current) => ({ ...current, trustedDomains: current.trustedDomains.filter((item) => item !== domain) }))
   }
 
   const activeStorageProvider = storageProviders.find((provider) => provider.isDefault)
@@ -2539,9 +2607,38 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
     <section className="section-card settings-card"><div className="settings-heading"><span className="metric-icon orange"><Link2 size={19} /></span><div><h3>访问域名</h3><p>图片直链由服务器生产配置统一生成</p></div><span className="status-pill">服务器配置</span></div><div className="settings-note"><Link2 size={15} /><span>当前浏览器地址：<code>{window.location.origin}</code>。生产环境请通过 <code>PICNEST_PUBLIC_URL</code> 设置唯一 HTTPS 公网域名，避免不同用户生成不一致的链接。</span></div></section>
   </>
 
+  const renderSecurityToggle = (key: 'imageEnabled' | 'videoEnabled', title: string, description: string) => (
+    <div className="toggle-row" key={key}>
+      <span><b>{title}</b><small>{description}</small></span>
+      <button
+        className={`switch ${hotlinkProtection[key] ? 'active' : ''}`}
+        disabled={user.role !== 'admin' || hotlinkProtectionLoading}
+        onClick={() => setHotlinkProtection((current) => ({ ...current, [key]: !current[key] }))}
+        aria-label={title}
+        aria-pressed={hotlinkProtection[key]}
+      ><i /></button>
+    </div>
+  )
+
   const renderSecuritySection = () => <>
     <div className="settings-section-intro"><span><ShieldCheck size={20} /></span><div><h2>安全设置</h2><p>查看账户身份、登录会话和安全提醒状态。</p></div></div>
     <section className="section-card settings-card"><div className="settings-heading"><span className="metric-icon green"><Lock size={19} /></span><div><h3>账户保护</h3><p>当前登录账户的身份与权限</p></div><span className="status-pill">受保护</span></div><div className="security-account"><span><Mail size={17} /></span><div><small>登录邮箱</small><b>{user.email}</b></div><em>{user.role === 'admin' ? '管理员' : '空间成员'}</em></div><div className="security-facts"><span><ShieldCheck size={15} /><b>HttpOnly Cookie</b><small>脚本无法读取会话令牌</small></span><span><Lock size={15} /><b>SameSite Lax</b><small>限制跨站请求携带登录态</small></span><span><KeyRound size={15} /><b>7 天会话</b><small>到期后需要重新登录</small></span></div></section>
+    <section className="section-card settings-card hotlink-protection-card">
+      <div className="settings-heading"><span className="metric-icon orange"><ShieldAlert size={19} /></span><div><h3>媒体防盗链</h3><p>按媒体类型控制外部网站嵌入和引用</p></div><span className={`status-pill ${hotlinkProtectionLoading ? 'off' : ''}`}>{hotlinkProtectionLoading ? '读取中' : '已配置'}</span></div>
+      {hotlinkProtectionLoading ? <div className="users-loading">正在读取防盗链策略…</div> : <>
+        {renderSecurityToggle('imageEnabled', '启用图片防盗链', '开启后，外部网站带来源嵌入图片会被拦截；无来源的直接访问仍然允许')}
+        {renderSecurityToggle('videoEnabled', '启用视频防盗链', '开启后，外部网站带来源嵌入视频会被拦截；视频 Range 播放仍按同一规则校验')}
+        <div className="trusted-domain-setting">
+          <div className="allowed-extension-heading"><span><b>可信引用域名</b><small>这些域名及其子域名可以引用已开启防盗链的图片和视频；PicNest 当前域名始终自动允许。</small></span><em>{hotlinkProtection.trustedDomains.length} 个</em></div>
+          <div className="extension-chip-list">
+            {hotlinkProtection.trustedDomains.map((domain) => <span className="extension-chip" key={domain}><code>{domain}</code>{user.role === 'admin' && <button type="button" onClick={() => removeTrustedDomain(domain)} aria-label={`移除可信域名 ${domain}`} title={`移除可信域名 ${domain}`}><X size={13} /></button>}</span>)}
+          </div>
+          {user.role === 'admin' && <div className="extension-adder trusted-domain-adder"><span>https://</span><input value={newTrustedDomain} maxLength={253} placeholder="例如 example.com" onChange={(event) => setNewTrustedDomain(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addTrustedDomain() } }} /><button type="button" className="button button-secondary" onClick={addTrustedDomain}><Plus size={15} /> 添加域名</button></div>}
+        </div>
+        <div className="settings-note"><ShieldCheck size={15} /><span>默认图片和视频均开启防盗链，单个媒体还可以在详情弹窗中单独关闭。防盗链主要防止网页盗嵌，不能替代登录授权或签名 URL。</span></div>
+        {user.role !== 'admin' && <div className="settings-note"><Lock size={15} /><span>当前策略由管理员统一维护。</span></div>}
+      </>}
+    </section>
     <section className="section-card settings-card"><div className="settings-heading"><span className="metric-icon orange"><ShieldCheck size={19} /></span><div><h3>接口防护</h3><p>服务端强制执行的生产安全策略</p></div></div><div className="security-facts"><span><ShieldCheck size={15} /><b>同源写操作</b><small>网页登录写请求会校验请求来源</small></span><span><Lock size={15} /><b>登录限流</b><small>同一来源 15 分钟最多尝试 10 次</small></span><span><KeyRound size={15} /><b>密钥隔离</b><small>Bearer 密钥不能管理其他密钥</small></span></div></section>
   </>
 
@@ -2589,6 +2686,7 @@ function SettingsView({ notify, user, guestUploadEnabled, onGuestUploadChange, o
           {activeSection === 'images' && renderImageSection()}
           {activeSection === 'notifications' && renderNotificationSection()}
           {activeSection === 'images' && <div className="save-settings"><button className="button button-primary" disabled={imageProcessingLoading || imageProcessingSaving || user.role !== 'admin'} onClick={() => void saveImageProcessing()}><Check size={16} /> {imageProcessingSaving ? '正在保存…' : '保存图片处理策略'}</button></div>}
+          {activeSection === 'security' && <div className="save-settings"><button className="button button-primary" disabled={hotlinkProtectionLoading || hotlinkProtectionSaving || user.role !== 'admin'} onClick={() => void saveHotlinkProtection()}><Check size={16} /> {hotlinkProtectionSaving ? '正在保存…' : '保存防盗链策略'}</button></div>}
         </div>
       </div>
       {storageModalOpen && <StorageProviderModal provider={editingStorageProvider} onClose={() => { setStorageModalOpen(false); setEditingStorageProvider(null) }} onSave={saveStorageProvider} />}
@@ -2787,6 +2885,7 @@ function ShareModal({ image, onClose, onPatch, onDelete, notify }: {
         </div>
         <div className="share-body">
           <div className="share-heading"><span><small>{image.album}</small><RenameControl name={image.name} mediaLabel="图片" onSave={(name) => onPatch(image.id, { name })} notify={notify} /><p>{image.width && image.height ? `${image.width} × ${image.height} · ` : ''}{formatBytes(image.size)} · {formatDate(image.createdAt)}</p></span><button className={image.starred ? 'starred' : ''} onClick={() => void onPatch(image.id, { starred: !image.starred })}><Star size={18} fill={image.starred ? 'currentColor' : 'none'} /></button></div>
+          <MediaHotlinkToggle enabled={image.hotlinkProtectionEnabled !== false} mediaLabel="图片" onChange={() => void onPatch(image.id, { hotlinkProtectionEnabled: image.hotlinkProtectionEnabled === false })} />
           <div className="share-tabs"><button className={activeTab === 'links' ? 'active' : ''} onClick={() => setActiveTab('links')}>分享链接</button><button className={activeTab === 'info' ? 'active' : ''} onClick={() => setActiveTab('info')}>图片信息</button></div>
           {activeTab === 'links' ? <div className="link-list"><ReferenceFields image={image} notify={notify} /></div> : <div className="image-info-content">
             <div className="image-info-grid">

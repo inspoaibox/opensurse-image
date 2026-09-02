@@ -104,6 +104,10 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.equal(registration.response.status, 201)
   const adminCookie = registration.response.headers.get('set-cookie').split(';', 1)[0]
 
+  const defaultHotlinkProtection = await requestJson(`${baseUrl}/api/settings/hotlink-protection`, { headers: { Cookie: adminCookie } })
+  assert.equal(defaultHotlinkProtection.response.status, 200)
+  assert.deepEqual(defaultHotlinkProtection.body, { imageEnabled: true, videoEnabled: true, trustedDomains: [] })
+
   const invalidRemoteImport = await requestJson(`${baseUrl}/api/remote-imports`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
@@ -192,6 +196,7 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   const image = upload.body[0]
   assert.equal(image.name, '中文图片.png')
   assert.equal(image.format, 'png')
+  assert.equal(image.hotlinkProtectionEnabled, true)
   assert.match(image.links.markdown, /中文图片\.png/)
 
   const media = await fetch(image.url)
@@ -200,6 +205,9 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.match(media.headers.get('content-security-policy') || '', /sandbox/)
   assert.equal(media.headers.get('cross-origin-resource-policy'), 'cross-origin')
   assert.deepEqual(Buffer.from(await media.arrayBuffer()), png)
+
+  const blockedImage = await fetch(image.url, { headers: { Referer: 'https://player.example.test/watch/demo' } })
+  assert.equal(blockedImage.status, 403)
 
   const crossOwnerRead = await requestJson(`${baseUrl}/api/images/${image.id}`, { headers: { Cookie: adminCookie } })
   assert.equal(crossOwnerRead.response.status, 404)
@@ -233,6 +241,7 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.equal(video.extension, '.mp4')
   assert.equal(video.mimeType, 'video/mp4')
   assert.equal(video.size, videoBytes.length)
+  assert.equal(video.hotlinkProtectionEnabled, true)
   assert.match(video.url, /\/media\/video\/[^/]+\/.+\.mp4$/)
   assert.equal(video.links.html.includes('<video controls'), true)
 
@@ -357,6 +366,23 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.equal(videoRange.headers.get('content-length'), '4')
   assert.deepEqual(Buffer.from(await videoRange.arrayBuffer()), videoBytes.subarray(1, 5))
 
+  const blockedVideo = await fetch(video.url, { headers: { Referer: 'https://player.example.test/watch/demo' } })
+  assert.equal(blockedVideo.status, 403)
+
+  const trustedHotlinkProtection = await requestJson(`${baseUrl}/api/settings/hotlink-protection`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+    body: JSON.stringify({ trustedDomains: ['player.example.test'] }),
+  })
+  assert.equal(trustedHotlinkProtection.response.status, 200)
+  assert.deepEqual(trustedHotlinkProtection.body, { imageEnabled: true, videoEnabled: true, trustedDomains: ['player.example.test'] })
+
+  const trustedImage = await fetch(image.url, { headers: { Referer: 'https://player.example.test/watch/demo' } })
+  assert.equal(trustedImage.status, 200)
+  assert.equal(trustedImage.headers.get('cache-control'), 'private, no-store')
+  assert.match(trustedImage.headers.get('vary') || '', /Referer/)
+  assert.deepEqual(Buffer.from(await trustedImage.arrayBuffer()), png)
+
   const embeddedVideo = await fetch(video.url, { headers: { Referer: 'https://player.example.test/watch/demo' } })
   assert.equal(embeddedVideo.status, 200)
   assert.deepEqual(Buffer.from(await embeddedVideo.arrayBuffer()), videoBytes)
@@ -364,15 +390,94 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   const trafficAnalytics = await requestJson(`${baseUrl}/api/analytics/traffic?days=7`, { headers: { Cookie: memberCookie } })
   assert.equal(trafficAnalytics.response.status, 200)
   assert.equal(trafficAnalytics.body.days, 7)
-  assert.equal(trafficAnalytics.body.summary.externalBytes, videoBytes.length)
+  assert.equal(trafficAnalytics.body.summary.externalBytes, png.length + videoBytes.length)
   assert.equal(trafficAnalytics.body.summary.rangeRequests, 1)
   assert.equal(trafficAnalytics.body.daily.length, 7)
   assert.equal(trafficAnalytics.body.daily.filter((item) => item.bytes > 0).length, 1)
   assert.equal(trafficAnalytics.body.referrers[0].host, 'player.example.test')
-  assert.equal(trafficAnalytics.body.referrers[0].bytes, videoBytes.length)
+  assert.equal(trafficAnalytics.body.referrers[0].bytes, png.length + videoBytes.length)
   const highestTrafficVideo = trafficAnalytics.body.topMedia.find((item) => item.mediaId === video.id)
   assert.equal(highestTrafficVideo.mediaType, 'video')
   assert.equal(highestTrafficVideo.externalBytes, videoBytes.length)
+
+  const invalidHotlinkDomain = await requestJson(`${baseUrl}/api/settings/hotlink-protection`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+    body: JSON.stringify({ trustedDomains: ['https://example.com/path'] }),
+  })
+  assert.equal(invalidHotlinkDomain.response.status, 400)
+
+  const invalidHotlinkBoolean = await requestJson(`${baseUrl}/api/settings/hotlink-protection`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+    body: JSON.stringify({ imageEnabled: 'false' }),
+  })
+  assert.equal(invalidHotlinkBoolean.response.status, 400)
+
+  const disabledImage = await requestJson(`${baseUrl}/api/images/${image.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: memberCookie },
+    body: JSON.stringify({ hotlinkProtectionEnabled: false }),
+  })
+  assert.equal(disabledImage.response.status, 200)
+  assert.equal(disabledImage.body.hotlinkProtectionEnabled, false)
+  const unprotectedImage = await fetch(image.url, { headers: { Referer: 'https://evil.example.test/embed' } })
+  assert.equal(unprotectedImage.status, 200)
+  assert.equal(unprotectedImage.headers.get('cache-control'), 'public, max-age=31536000, immutable')
+  assert.deepEqual(Buffer.from(await unprotectedImage.arrayBuffer()), png)
+
+  const restoredImage = await requestJson(`${baseUrl}/api/images/${image.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: memberCookie },
+    body: JSON.stringify({ hotlinkProtectionEnabled: true }),
+  })
+  assert.equal(restoredImage.response.status, 200)
+  assert.equal(restoredImage.body.hotlinkProtectionEnabled, true)
+
+  const disabledVideo = await requestJson(`${baseUrl}/api/videos/${video.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: memberCookie },
+    body: JSON.stringify({ hotlinkProtectionEnabled: false }),
+  })
+  assert.equal(disabledVideo.response.status, 200)
+  assert.equal(disabledVideo.body.hotlinkProtectionEnabled, false)
+  const unprotectedVideo = await fetch(video.url, { headers: { Referer: 'https://evil.example.test/embed' } })
+  assert.equal(unprotectedVideo.status, 200)
+  assert.equal(unprotectedVideo.headers.get('cache-control'), 'public, max-age=31536000, immutable')
+  assert.deepEqual(Buffer.from(await unprotectedVideo.arrayBuffer()), videoBytes)
+
+  const restoredVideo = await requestJson(`${baseUrl}/api/videos/${video.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: memberCookie },
+    body: JSON.stringify({ hotlinkProtectionEnabled: true }),
+  })
+  assert.equal(restoredVideo.response.status, 200)
+  assert.equal(restoredVideo.body.hotlinkProtectionEnabled, true)
+
+  const imageSystemDisabled = await requestJson(`${baseUrl}/api/settings/hotlink-protection`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+    body: JSON.stringify({ imageEnabled: false, videoEnabled: true, trustedDomains: [] }),
+  })
+  assert.equal(imageSystemDisabled.response.status, 200)
+  assert.equal((await fetch(image.url, { headers: { Referer: 'https://evil.example.test/embed' } })).status, 200)
+  assert.equal((await fetch(video.url, { headers: { Referer: 'https://evil.example.test/embed' } })).status, 403)
+
+  const videoSystemDisabled = await requestJson(`${baseUrl}/api/settings/hotlink-protection`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+    body: JSON.stringify({ imageEnabled: true, videoEnabled: false, trustedDomains: [] }),
+  })
+  assert.equal(videoSystemDisabled.response.status, 200)
+  assert.equal((await fetch(image.url, { headers: { Referer: 'https://evil.example.test/embed' } })).status, 403)
+  assert.equal((await fetch(video.url, { headers: { Referer: 'https://evil.example.test/embed' } })).status, 200)
+
+  const restoredHotlinkProtection = await requestJson(`${baseUrl}/api/settings/hotlink-protection`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+    body: JSON.stringify({ imageEnabled: true, videoEnabled: true, trustedDomains: [] }),
+  })
+  assert.equal(restoredHotlinkProtection.response.status, 200)
 
   const invalidVideoRange = await fetch(video.url, { headers: { Range: `bytes=${videoBytes.length}-` } })
   assert.equal(invalidVideoRange.status, 416)
@@ -551,12 +656,14 @@ test('旧版 SQLite 结构会在启动时自动迁移', async (context) => {
   const migrated = new Database(databasePath, { readonly: true })
   const columnNames = (table) => migrated.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name)
   assert.equal(columnNames('users').includes('storage_provider_id'), true)
-  for (const column of ['guest_uploaded', 'storage_provider_id', 'storage_key', 'exif_json', 'processing_json']) assert.equal(columnNames('images').includes(column), true)
+  for (const column of ['guest_uploaded', 'storage_provider_id', 'storage_key', 'exif_json', 'processing_json', 'hotlink_protection_enabled']) assert.equal(columnNames('images').includes(column), true)
   assert.equal(columnNames('albums').includes('is_default'), true)
   assert.equal(columnNames('api_keys').includes('secret_encrypted'), true)
   assert.equal(migrated.prepare('SELECT is_default FROM albums WHERE id = ?').get('legacy-album').is_default, 1)
   assert.equal(columnNames('video_categories').includes('is_default'), true)
   assert.equal(migrated.prepare('SELECT COUNT(*) AS count FROM video_categories').get().count, 1)
+  assert.equal(columnNames('videos').includes('hotlink_protection_enabled'), true)
+  assert.equal(migrated.prepare('SELECT hotlink_protection_enabled FROM videos WHERE id = ?').get('legacy-video').hotlink_protection_enabled, 1)
   assert.equal(migrated.prepare('SELECT album FROM videos WHERE id = ?').get('legacy-video').album, '视频')
   migrated.close()
 })

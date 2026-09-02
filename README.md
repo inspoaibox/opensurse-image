@@ -12,6 +12,7 @@ PicNest 是一个自托管、多用户的图片和视频托管与资产管理系
 - [本地开发](#本地开发)
 - [Linux 生产部署](#linux-生产部署)
 - [远程导入](#远程导入)
+- [媒体防盗链](#媒体防盗链)
 - [环境变量](#环境变量)
 - [存储服务](#存储服务)
 - [Nginx 反向代理](#nginx-反向代理)
@@ -39,6 +40,7 @@ PicNest 是一个自托管、多用户的图片和视频托管与资产管理系
 - 管理员可编辑成员资料、角色、密码、存储配额和目标存储服务
 - API 密钥调用按月统计次数、成功率、响应耗时和流量
 - 统计分析按天记录媒体直链实际流量、外部引用域名、Range 请求和高消耗媒体
+- 图片和视频默认开启防盗链，支持系统级按类型开关、可信引用域名和单个媒体独立关闭
 - 首位用户自动成为管理员，后续账户由管理员创建
 - 网格/列表图库、关键词、相册和格式筛选
 - 直链、Markdown、HTML、BBCode 一键复制
@@ -354,6 +356,50 @@ curl "https://img.example.com/api/remote-imports/TASK_ID" \
 ```
 
 任务完成时，`result` 会包含最终图片或视频对象；失败时读取 `error`。任务状态保存在当前服务进程内，服务重启或任务超过 1 小时后将无法继续查询。
+
+## 媒体防盗链
+
+PicNest 默认对图片和视频都开启防盗链，并在“系统设置 → 安全设置 → 媒体防盗链”中分别提供图片、视频两个系统级开关。系统级开关与单个媒体的开关同时开启时才会拦截外部引用；单个图片或视频可以在详情弹窗中单独关闭，关闭后允许外部网站直接引用该媒体。
+
+防盗链按 `Referer`、`Origin` 和浏览器跨站请求标记判断来源：
+
+- 当前 PicNest 域名始终允许
+- “可信引用域名”支持填写域名及其子域名，例如 `example.com` 会允许 `www.example.com`
+- 无 `Referer` 的直接访问默认允许，兼容 curl、第三方播放器和隐私浏览器
+- 明确来自未信任外部站点的图片、视频请求返回 `403`
+- 视频的 `Range` 分段请求使用同一套规则
+
+管理员可以通过 API 读取和修改系统级策略：
+
+```bash
+curl "https://img.example.com/api/settings/hotlink-protection" \
+  -H "Authorization: Bearer pn_live_xxx"
+
+curl -X PATCH "https://img.example.com/api/settings/hotlink-protection" \
+  -H "Cookie: picnest_session=..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "imageEnabled": true,
+    "videoEnabled": true,
+    "trustedDomains": ["player.example.com", "cdn.example.com"]
+  }'
+```
+
+单个媒体使用各自的 PATCH 接口修改：
+
+```bash
+curl -X PATCH "https://img.example.com/api/images/IMAGE_ID" \
+  -H "Authorization: Bearer pn_live_xxx" \
+  -H "Content-Type: application/json" \
+  -d '{"hotlinkProtectionEnabled":false}'
+
+curl -X PATCH "https://img.example.com/api/videos/VIDEO_ID" \
+  -H "Authorization: Bearer pn_live_xxx" \
+  -H "Content-Type: application/json" \
+  -d '{"hotlinkProtectionEnabled":true}'
+```
+
+启用防盗链时媒体响应使用 `Cache-Control: private, no-store` 和按来源变化的 `Vary`，避免缓存层把已允许的响应复用给其他站点。若前置 CDN 会直接缓存媒体或覆盖响应头，还应在 CDN 层配置对应的防盗链规则。该功能主要用于防止网页盗嵌，不能替代登录授权、临时签名 URL 或真正的私有访问控制。
 
 ## 统计分析
 
@@ -1077,7 +1123,7 @@ curl -X POST https://img.example.com/api/images \
 
 上传接口始终返回图片对象数组，即使只上传一张；成功状态码为 `201`。服务端根据图片内容识别真实格式，并核对文件名扩展名；扩展名与真实格式不一致或内容无法识别时返回 `400`。成功后返回带真实后缀的公开地址，例如 `/media/:id/cover.png`。`GET /api/images` 返回同结构的数组，`GET /api/images/:id` 和 `PATCH /api/images/:id` 返回单个图片对象。
 
-图片对象包含 `filename`、绝对 `url`、相对 `path`、`type`、`format`、`extension`、`mimeType`、持久化的 `processing` 处理结果，以及 `links.direct`、`links.markdown`、`links.bbcode`、`links.html` 四种完整引用。生产环境应配置 `PICNEST_PUBLIC_URL=https://img.example.com`，避免反向代理环境下返回内部地址。
+图片对象包含 `filename`、绝对 `url`、相对 `path`、`type`、`format`、`extension`、`mimeType`、持久化的 `processing` 处理结果、`hotlinkProtectionEnabled`，以及 `links.direct`、`links.markdown`、`links.bbcode`、`links.html` 四种完整引用。生产环境应配置 `PICNEST_PUBLIC_URL=https://img.example.com`，避免反向代理环境下返回内部地址。
 
 视频上传使用独立的 `/api/videos` 接口，Bearer API 密钥的认证方式与图片一致：
 
@@ -1089,9 +1135,9 @@ curl -X POST https://img.example.com/api/videos \
   -F "category=产品演示"
 ```
 
-视频上传始终返回视频对象数组，即使只上传一个文件；单次最多 10 个，单个大小上限由 `PICNEST_VIDEO_MAX_MB` 控制，默认 500 MB。`GET /api/videos` 返回列表，`GET /api/videos/:id` 返回单个对象，`PATCH /api/videos/:id` 支持修改 `name`、`category` 和 `starred`，`POST /api/videos/bulk-delete` 支持按 ID 数组批量删除。分类通过 `GET/POST /api/video-categories` 管理，并可用 `PATCH /api/video-categories/:id/default` 设置默认分类。
+视频上传始终返回视频对象数组，即使只上传一个文件；单次最多 10 个，单个大小上限由 `PICNEST_VIDEO_MAX_MB` 控制，默认 500 MB。`GET /api/videos` 返回列表，`GET /api/videos/:id` 返回单个对象，`PATCH /api/videos/:id` 支持修改 `name`、`category`、`starred` 和 `hotlinkProtectionEnabled`，`POST /api/videos/bulk-delete` 支持按 ID 数组批量删除。分类通过 `GET/POST /api/video-categories` 管理，并可用 `PATCH /api/video-categories/:id/default` 设置默认分类。
 
-媒体库将图片相册与视频分类分开管理。视频通过独立接口保存，视频与图片共用用户配额和存储服务。支持 `mp4`、`webm`、`mov`、`m4v`、`avi`、`mkv`，服务端按原始字节保存，不经过 Sharp 图片处理。图片和视频都可以在详情弹窗中重命名，系统会保持真实格式扩展名并同步更新公开文件名和引用地址。视频可以在媒体库的“视频”页按分类筛选、上传、播放、分享、收藏和删除；分类支持创建、设置默认分类，以及在视频详情中重新归类。视频直链公开可读取，响应支持 `Accept-Ranges: bytes`；浏览器可以使用 `Range` 请求进行按需加载、进度拖动和断点播放。视频对象同样返回 `filename`、`url`、`path`、`type`、`format`、`extension`、`mimeType`、`size`、`category`、`links` 和 `createdAt`，并提供 HTML5 `<video>` 引用。旧客户端使用的 `album` 字段继续作为兼容别名。
+媒体库将图片相册与视频分类分开管理。视频通过独立接口保存，视频与图片共用用户配额和存储服务。支持 `mp4`、`webm`、`mov`、`m4v`、`avi`、`mkv`，服务端按原始字节保存，不经过 Sharp 图片处理。图片和视频都可以在详情弹窗中重命名，系统会保持真实格式扩展名并同步更新公开文件名和引用地址。视频可以在媒体库的“视频”页按分类筛选、上传、播放、分享、收藏和删除；分类支持创建、设置默认分类，以及在视频详情中重新归类。视频直链公开可读取，响应支持 `Accept-Ranges: bytes`；浏览器可以使用 `Range` 请求进行按需加载、进度拖动和断点播放。视频对象同样返回 `filename`、`url`、`path`、`type`、`format`、`extension`、`mimeType`、`size`、`category`、`hotlinkProtectionEnabled`、`links` 和 `createdAt`，并提供 HTML5 `<video>` 引用。旧客户端使用的 `album` 字段继续作为兼容别名。
 
 系统图片处理默认开启、默认保持原格式。管理员可在“系统设置 → 图片处理”中设置输出为 JPEG、PNG、WebP 或 AVIF，调整 1–100 的转换质量，并配置 EXIF 自动旋转和元数据清理。
 
@@ -1119,11 +1165,11 @@ API 上传可使用 multipart 字段 `format`、`quality`、`autoOrient`、`stri
 | `GET/POST` | `/api/images` | 用户/API 密钥 | 图片列表或上传 |
 | `GET` | `/api/images/:id` | 图片所有者 | 读取单张图片的完整对象与引用地址 |
 | `GET` | `/api/images/:id/metadata` | 图片所有者 | 按需读取并补提取完整图片元数据 |
-| `PATCH/DELETE` | `/api/images/:id` | 图片所有者 | 修改或删除图片 |
+| `PATCH/DELETE` | `/api/images/:id` | 图片所有者 | 修改名称、相册、收藏状态或防盗链、删除图片 |
 | `POST` | `/api/images/bulk-delete` | 图片所有者 | 批量删除 |
 | `GET/POST` | `/api/videos` | 用户/API 密钥 | 视频列表或上传，单次最多 10 个 |
 | `GET` | `/api/videos/:id` | 视频所有者 | 读取单个视频的完整对象与引用地址 |
-| `PATCH/DELETE` | `/api/videos/:id` | 视频所有者 | 修改名称、分类或收藏状态、删除视频 |
+| `PATCH/DELETE` | `/api/videos/:id` | 视频所有者 | 修改名称、分类、收藏状态或防盗链、删除视频 |
 | `POST` | `/api/videos/bulk-delete` | 视频所有者 | 批量删除视频 |
 | `POST` | `/api/remote-imports` | 用户/API 密钥 | 创建服务器端远程导入任务，异步返回 `202` |
 | `GET` | `/api/remote-imports/:id` | 创建者/API 密钥 | 查询远程导入任务进度和结果 |
@@ -1137,6 +1183,8 @@ API 上传可使用 multipart 字段 `format`、`quality`、`autoOrient`、`stri
 | `PATCH` | `/api/settings/guest-upload` | 管理员会话 | 开关游客上传 |
 | `GET` | `/api/settings/image-processing` | 用户/API 密钥 | 读取系统图片处理默认策略 |
 | `PATCH` | `/api/settings/image-processing` | 管理员会话 | 修改允许上传类型与默认图片处理策略 |
+| `GET` | `/api/settings/hotlink-protection` | 用户/API 密钥 | 读取图片和视频防盗链策略 |
+| `PATCH` | `/api/settings/hotlink-protection` | 管理员会话 | 修改图片和视频防盗链策略 |
 | `GET` | `/api/storage/providers` | 用户会话 | 查看已脱敏的存储服务列表 |
 | `POST` | `/api/storage/providers` | 管理员会话 | 添加存储配置 |
 | `PATCH/DELETE` | `/api/storage/providers/:id` | 管理员会话 | 修改或删除存储配置 |
@@ -1145,7 +1193,7 @@ API 上传可使用 multipart 字段 `format`、`quality`、`autoOrient`、`stri
 | `GET` | `/api/stats` | 用户/API 密钥 | 当前用户空间统计 |
 | `GET` | `/api/analytics/traffic?days=30` | 当前用户会话 | 查询每日媒体引用/分享流量、来源域名和高消耗媒体 |
 
-公开图片由 `GET /media/:id/:filename.ext` 返回，视频由 `GET /media/video/:id/:filename.ext` 返回；两者都包含实际 `Content-Type`、UTF-8 文件名、缓存头和 ETag。视频媒体地址额外支持 `Range` 请求并返回 `206 Partial Content`，旧的无文件名地址继续兼容。完整交互式文档可在登录后的“开发者 → 阅读 API 文档”中查看。
+公开图片由 `GET /media/:id/:filename.ext` 返回，视频由 `GET /media/video/:id/:filename.ext` 返回；两者都包含实际 `Content-Type`、UTF-8 文件名、缓存头和 ETag，并按防盗链策略返回 `403` 或媒体内容。视频媒体地址额外支持 `Range` 请求并返回 `206 Partial Content`，旧的无文件名地址继续兼容。完整交互式文档可在登录后的“开发者 → 阅读 API 文档”中查看。
 
 ## 常见问题
 

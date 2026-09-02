@@ -93,6 +93,7 @@ export interface ImageItem {
   height: number | null
   album: string
   starred: boolean
+  hotlinkProtectionEnabled: boolean
   guestUploaded?: boolean
   views: number
   processing?: {
@@ -127,6 +128,7 @@ export interface VideoItem {
   album: string
   category?: string
   starred: boolean
+  hotlinkProtectionEnabled: boolean
   views: number
   links?: {
     direct: string
@@ -167,6 +169,12 @@ export interface ImageProcessingSettings {
   autoOrient: boolean
   stripMetadata: boolean
   allowedExtensions: string[]
+}
+
+export interface HotlinkProtectionSettings {
+  imageEnabled: boolean
+  videoEnabled: boolean
+  trustedDomains: string[]
 }
 
 export interface ImageMetadata {

@@ -124,6 +124,7 @@ try {
   await page.getByRole('button', { name: '图片库' }).click()
   await page.getByRole('heading', { name: '图片库', exact: true }).waitFor()
   await page.getByRole('button', { name: '查看大图 上线检查.png' }).click()
+  await page.getByRole('button', { name: '启用图片防盗链' }).waitFor()
   await page.getByRole('button', { name: '重命名图片' }).click()
   await page.getByLabel('重命名图片').fill('上线检查改名.png')
   await page.getByRole('button', { name: '保存图片名称' }).click()
@@ -141,6 +142,7 @@ try {
   await page.screenshot({ path: path.join(outputDirectory, 'desktop-media-videos.png'), fullPage: true })
   await page.getByRole('button', { name: '播放视频 上线检查视频.mp4' }).waitFor()
   await page.getByRole('button', { name: '播放视频 上线检查视频.mp4' }).click()
+  await page.getByRole('button', { name: '启用视频防盗链' }).waitFor()
   await page.getByRole('button', { name: '重命名视频' }).click()
   await page.getByLabel('重命名视频').fill('上线检查视频改名.mp4')
   await page.getByRole('button', { name: '保存视频名称' }).click()
@@ -181,6 +183,12 @@ try {
 
   await page.getByRole('button', { name: '系统设置' }).click()
   await page.getByRole('heading', { name: '系统设置', exact: true }).waitFor()
+  await page.getByRole('button', { name: '安全设置', exact: true }).click()
+  const hotlinkCard = page.locator('.hotlink-protection-card')
+  await hotlinkCard.getByRole('heading', { name: '媒体防盗链', exact: true }).waitFor()
+  await hotlinkCard.getByRole('button', { name: '启用图片防盗链' }).waitFor()
+  await hotlinkCard.getByRole('button', { name: '启用视频防盗链' }).waitFor()
+  await hotlinkCard.getByText('可信引用域名', { exact: true }).waitFor()
   for (const section of ['安全设置', '图片处理', '通知', '存储与域名']) {
     await page.getByRole('button', { name: section, exact: true }).click()
   }

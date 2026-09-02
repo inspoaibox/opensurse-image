@@ -29,6 +29,11 @@ const dataDir = path.join(__dirname, 'data')
 const uploadTempDir = path.join(dataDir, 'tmp')
 const databaseFile = path.resolve(process.env.PICNEST_DB_PATH || path.join(dataDir, 'picnest.db'))
 const secretFile = path.join(dataDir, '.session-secret')
+const defaultHotlinkProtectionSettings = Object.freeze({
+  imageEnabled: true,
+  videoEnabled: true,
+  trustedDomains: Object.freeze([]),
+})
 const isProduction = process.env.NODE_ENV === 'production'
 const configuredVideoMaxMb = Number(process.env.PICNEST_VIDEO_MAX_MB || 500)
 const videoMaxBytes = Number.isFinite(configuredVideoMaxMb) && configuredVideoMaxMb > 0
@@ -117,6 +122,7 @@ db.exec(`
     url TEXT NOT NULL,
     type TEXT NOT NULL,
     mime_type TEXT NOT NULL,
+    hotlink_protection_enabled INTEGER NOT NULL DEFAULT 1,
     size INTEGER NOT NULL DEFAULT 0,
     width INTEGER,
     height INTEGER,
@@ -140,6 +146,7 @@ db.exec(`
     url TEXT NOT NULL,
     type TEXT NOT NULL,
     mime_type TEXT NOT NULL,
+    hotlink_protection_enabled INTEGER NOT NULL DEFAULT 1,
     size INTEGER NOT NULL DEFAULT 0,
     album TEXT NOT NULL DEFAULT '视频',
     starred INTEGER NOT NULL DEFAULT 0,
@@ -254,6 +261,9 @@ if (!imageColumns.some((column) => column.name === 'exif_json')) {
 if (!imageColumns.some((column) => column.name === 'processing_json')) {
   db.exec('ALTER TABLE images ADD COLUMN processing_json TEXT')
 }
+if (!imageColumns.some((column) => column.name === 'hotlink_protection_enabled')) {
+  db.exec('ALTER TABLE images ADD COLUMN hotlink_protection_enabled INTEGER NOT NULL DEFAULT 1')
+}
 db.prepare(`
   UPDATE images SET storage_provider_id = 'local', storage_key = owner_id || '/' || filename
   WHERE filename IS NOT NULL AND (storage_provider_id IS NULL OR storage_key IS NULL)
@@ -263,6 +273,10 @@ if (!albumColumns.some((column) => column.name === 'is_default')) {
   db.exec('ALTER TABLE albums ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0')
 }
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_albums_one_default_per_owner ON albums(owner_id) WHERE is_default = 1')
+const videoColumns = db.prepare('PRAGMA table_info(videos)').all()
+if (!videoColumns.some((column) => column.name === 'hotlink_protection_enabled')) {
+  db.exec('ALTER TABLE videos ADD COLUMN hotlink_protection_enabled INTEGER NOT NULL DEFAULT 1')
+}
 const apiKeyColumns = db.prepare('PRAGMA table_info(api_keys)').all()
 if (!apiKeyColumns.some((column) => column.name === 'secret_encrypted')) {
   db.exec('ALTER TABLE api_keys ADD COLUMN secret_encrypted TEXT')
@@ -271,6 +285,8 @@ db.prepare('INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES (
   .run('guest_upload_enabled', 'false', new Date().toISOString())
 db.prepare('INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)')
   .run('image_processing', JSON.stringify(defaultImageProcessingSettings), new Date().toISOString())
+db.prepare('INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)')
+  .run('hotlink_protection', JSON.stringify(defaultHotlinkProtectionSettings), new Date().toISOString())
 
 const getImageProcessingSettings = () => {
   const value = db.prepare('SELECT value FROM app_settings WHERE key = ?').get('image_processing')?.value
@@ -287,6 +303,62 @@ const parseBooleanField = (value, fallback) => {
   if (String(value).toLowerCase() === 'true') return true
   if (String(value).toLowerCase() === 'false') return false
   throw new ImageProcessingError('布尔参数必须是 true 或 false', 400)
+}
+
+const parseStrictBooleanField = (value, fallback) => {
+  if (value === undefined) return fallback
+  if (typeof value !== 'boolean') throw new ImageProcessingError('布尔参数必须是 true 或 false', 400)
+  return value
+}
+
+const normalizeHotlinkDomain = (value) => {
+  const raw = String(value || '').trim().toLowerCase()
+  if (!raw) throw new ImageProcessingError('可信引用域名不能为空', 400)
+  let parsed
+  try {
+    parsed = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`)
+  } catch {
+    throw new ImageProcessingError(`可信引用域名无效：${raw}`, 400)
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '')
+  if (
+    parsed.username
+    || parsed.password
+    || parsed.port
+    || parsed.pathname !== '/'
+    || parsed.search
+    || parsed.hash
+    || !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/i.test(hostname)
+  ) {
+    throw new ImageProcessingError(`可信引用域名无效：${raw}`, 400)
+  }
+  return hostname
+}
+
+const normalizeHotlinkProtectionSettings = (input = {}, fallback = defaultHotlinkProtectionSettings) => {
+  const source = input && typeof input === 'object' ? input : {}
+  const trustedDomains = source.trustedDomains === undefined ? fallback.trustedDomains : source.trustedDomains
+  if (!Array.isArray(trustedDomains)) throw new ImageProcessingError('可信引用域名必须是数组', 400)
+  if (trustedDomains.length > 50) throw new ImageProcessingError('最多可以配置 50 个可信引用域名', 400)
+  const normalizedDomains = []
+  for (const domain of trustedDomains) {
+    const normalized = normalizeHotlinkDomain(domain)
+    if (!normalizedDomains.includes(normalized)) normalizedDomains.push(normalized)
+  }
+  return {
+    imageEnabled: parseStrictBooleanField(source.imageEnabled, fallback.imageEnabled),
+    videoEnabled: parseStrictBooleanField(source.videoEnabled, fallback.videoEnabled),
+    trustedDomains: normalizedDomains,
+  }
+}
+
+const getHotlinkProtectionSettings = () => {
+  const value = db.prepare('SELECT value FROM app_settings WHERE key = ?').get('hotlink_protection')?.value
+  try {
+    return normalizeHotlinkProtectionSettings(value ? JSON.parse(value) : {}, defaultHotlinkProtectionSettings)
+  } catch {
+    return { ...defaultHotlinkProtectionSettings, trustedDomains: [] }
+  }
 }
 
 const uploadProcessingSettings = (body = {}, allowOverrides = true) => {
@@ -429,6 +501,31 @@ const classifyMediaRequest = (req) => {
   if (fetchSite === 'cross-site') return { sourceType: 'external', referrerHost: '(跨站未知来源)' }
   return { sourceType: 'direct', referrerHost: '' }
 }
+const hotlinkDomainMatches = (hostname, trustedDomain) => hostname === trustedDomain || hostname.endsWith(`.${trustedDomain}`)
+const hotlinkRequestAllowed = (req, settings) => {
+  const referer = String(req.get('referer') || '').trim()
+  const fetchSite = String(req.get('sec-fetch-site') || '').trim().toLowerCase()
+  const requestOriginValue = String(req.get('origin') || '').trim()
+  const ownOrigin = requestOrigin(req)
+  const ownHost = (() => {
+    try { return new URL(ownOrigin).host.toLowerCase() } catch { return '' }
+  })()
+  const trustedDomains = settings.trustedDomains
+  const trustedOrigin = (value) => {
+    try {
+      const parsed = new URL(value)
+      if (!['http:', 'https:'].includes(parsed.protocol)) return false
+      return parsed.host.toLowerCase() === ownHost
+        || trustedDomains.some((domain) => hotlinkDomainMatches(parsed.hostname.toLowerCase(), domain))
+    } catch {
+      return false
+    }
+  }
+
+  if (referer) return trustedOrigin(referer)
+  if (requestOriginValue && requestOriginValue !== 'null') return trustedOrigin(requestOriginValue)
+  return fetchSite !== 'cross-site'
+}
 const upsertMediaTraffic = db.prepare(`
   INSERT INTO media_traffic_daily (
     owner_id, media_type, media_id, traffic_date, requests, bytes,
@@ -515,6 +612,7 @@ const mapImage = (row, req) => {
     height: row.height === null ? null : Number(row.height),
     album: row.album,
     starred: Boolean(row.starred),
+    hotlinkProtectionEnabled: row.hotlink_protection_enabled !== 0,
     views: Number(row.views),
     guestUploaded: Boolean(row.guest_uploaded),
     processing: parseStoredJson(row.processing_json),
@@ -548,6 +646,7 @@ const mapVideo = (row, req) => {
     album: row.album || '视频',
     category: row.album || '视频',
     starred: Boolean(row.starred),
+    hotlinkProtectionEnabled: row.hotlink_protection_enabled !== 0,
     views: Number(row.views),
     links: {
       direct: url,
@@ -1301,6 +1400,13 @@ const streamManagedMedia = async (req, res, { table, filenameFor, missingMessage
     return res.status(404).json({ message: missingMessage })
   }
 
+  const mediaType = table === 'videos' ? 'video' : 'image'
+  const hotlinkSettings = getHotlinkProtectionSettings()
+  const hotlinkProtectionEnabled = hotlinkSettings[`${mediaType}Enabled`] && media.hotlink_protection_enabled !== 0
+  if (hotlinkProtectionEnabled && !hotlinkRequestAllowed(req, hotlinkSettings)) {
+    return res.status(403).json({ message: `该${mediaType === 'video' ? '视频' : '图片'}已启用防盗链，仅允许站内或已配置的可信域名访问` })
+  }
+
   res.setHeader('Accept-Ranges', 'bytes')
   try {
     const object = await storageManager.openStoredObject(media, { rangeHeader: req.headers.range })
@@ -1314,7 +1420,8 @@ const streamManagedMedia = async (req, res, { table, filenameFor, missingMessage
 
     res.setHeader('Content-Type', object.contentType || media.mime_type || 'application/octet-stream')
     res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(filenameFor(media))}`)
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+    res.setHeader('Cache-Control', hotlinkProtectionEnabled ? 'private, no-store' : 'public, max-age=31536000, immutable')
+    if (hotlinkProtectionEnabled) res.setHeader('Vary', 'Referer, Origin, Sec-Fetch-Site')
     res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'")
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
     res.setHeader('ETag', etag)
@@ -1484,6 +1591,17 @@ app.patch('/api/settings/image-processing', authenticate, requireSessionAuth, re
   const settings = normalizeImageProcessingSettings(req.body || {}, getImageProcessingSettings())
   db.prepare('UPDATE app_settings SET value = ?, updated_at = ? WHERE key = ?')
     .run(JSON.stringify(settings), new Date().toISOString(), 'image_processing')
+  res.json(settings)
+})
+
+app.get('/api/settings/hotlink-protection', authenticate, (_req, res) => {
+  res.json(getHotlinkProtectionSettings())
+})
+
+app.patch('/api/settings/hotlink-protection', authenticate, requireSessionAuth, requireAdmin, (req, res) => {
+  const settings = normalizeHotlinkProtectionSettings(req.body || {}, getHotlinkProtectionSettings())
+  db.prepare('UPDATE app_settings SET value = ?, updated_at = ? WHERE key = ?')
+    .run(JSON.stringify(settings), new Date().toISOString(), 'hotlink_protection')
   res.json(settings)
 })
 
@@ -1757,12 +1875,16 @@ app.patch('/api/videos/:id', authenticate, (req, res) => {
       : video.album || ensureDefaultVideoCategory(req.user.id)
   const category = requestedCategory || ensureDefaultVideoCategory(req.user.id)
   const starred = Object.hasOwn(req.body, 'starred') ? (req.body.starred ? 1 : 0) : video.starred
+  const hotlinkProtectionEnabled = Object.hasOwn(req.body, 'hotlinkProtectionEnabled')
+    ? (req.body.hotlinkProtectionEnabled ? 1 : 0)
+    : video.hotlink_protection_enabled
   if (!validImageName(name)) return res.status(400).json({ message: '视频名称需要 1 到 255 个字符' })
   if (!validAlbumName(category)) return res.status(400).json({ message: '视频分类名称需要 1 到 100 个字符' })
   if (Object.hasOwn(req.body, 'starred') && typeof req.body.starred !== 'boolean') return res.status(400).json({ message: 'starred 必须是布尔值' })
+  if (Object.hasOwn(req.body, 'hotlinkProtectionEnabled') && typeof req.body.hotlinkProtectionEnabled !== 'boolean') return res.status(400).json({ message: 'hotlinkProtectionEnabled 必须是布尔值' })
   ensureVideoCategory(req.user.id, category)
-  db.prepare('UPDATE videos SET name = ?, album = ?, starred = ? WHERE id = ? AND owner_id = ?')
-    .run(name, category, starred, req.params.id, req.user.id)
+  db.prepare('UPDATE videos SET name = ?, album = ?, starred = ?, hotlink_protection_enabled = ? WHERE id = ? AND owner_id = ?')
+    .run(name, category, starred, hotlinkProtectionEnabled, req.params.id, req.user.id)
   res.json(mapVideo(db.prepare('SELECT * FROM videos WHERE id = ?').get(req.params.id), req))
 })
 
@@ -1794,11 +1916,15 @@ app.patch('/api/images/:id', authenticate, (req, res) => {
   const name = Object.hasOwn(req.body, 'name') ? String(req.body.name).trim() : image.name
   const album = Object.hasOwn(req.body, 'album') ? String(req.body.album).trim() || '未分类' : image.album
   const starred = Object.hasOwn(req.body, 'starred') ? (req.body.starred ? 1 : 0) : image.starred
+  const hotlinkProtectionEnabled = Object.hasOwn(req.body, 'hotlinkProtectionEnabled')
+    ? (req.body.hotlinkProtectionEnabled ? 1 : 0)
+    : image.hotlink_protection_enabled
   if (!validImageName(name)) return res.status(400).json({ message: '图片名称需要 1 到 255 个字符' })
   if (!validAlbumName(album)) return res.status(400).json({ message: '相册名称需要 1 到 100 个字符' })
   if (Object.hasOwn(req.body, 'starred') && typeof req.body.starred !== 'boolean') return res.status(400).json({ message: 'starred 必须是布尔值' })
-  db.prepare('UPDATE images SET name = ?, album = ?, starred = ? WHERE id = ? AND owner_id = ?')
-    .run(name, album, starred, req.params.id, req.user.id)
+  if (Object.hasOwn(req.body, 'hotlinkProtectionEnabled') && typeof req.body.hotlinkProtectionEnabled !== 'boolean') return res.status(400).json({ message: 'hotlinkProtectionEnabled 必须是布尔值' })
+  db.prepare('UPDATE images SET name = ?, album = ?, starred = ?, hotlink_protection_enabled = ? WHERE id = ? AND owner_id = ?')
+    .run(name, album, starred, hotlinkProtectionEnabled, req.params.id, req.user.id)
   db.prepare('INSERT OR IGNORE INTO albums (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)')
     .run(crypto.randomUUID(), req.user.id, album, new Date().toISOString())
   res.json(mapImage(db.prepare('SELECT * FROM images WHERE id = ?').get(req.params.id), req))

@@ -25,6 +25,7 @@ const endpointGroups = [
       ['DELETE', '/api/images/:id', '删除图片记录与原文件'],
       ['POST', '/api/images/bulk-delete', '按 ID 数组批量删除图片'],
       ['GET', '/api/settings/image-processing', '读取系统图片处理默认策略'],
+      ['GET', '/api/settings/hotlink-protection', '读取图片和视频防盗链策略'],
     ],
   },
   {
@@ -88,6 +89,7 @@ const endpointGroups = [
       ['PATCH', '/api/users/:id', '编辑成员、配额与存储策略，仅管理员网页登录会话'],
       ['PATCH', '/api/settings/guest-upload', '开启或关闭游客上传，仅管理员网页登录会话'],
       ['PATCH', '/api/settings/image-processing', '修改允许上传类型与默认图片处理策略，仅管理员网页登录会话'],
+      ['PATCH', '/api/settings/hotlink-protection', '修改图片和视频防盗链策略，仅管理员网页登录会话'],
       ['GET / POST', '/api/storage/providers', '列出或添加存储服务，仅网页登录会话；写操作要求管理员'],
       ['PATCH / DELETE', '/api/storage/providers/:id', '编辑或删除存储服务，仅管理员网页登录会话'],
       ['POST', '/api/storage/providers/:id/test', '检测读取、写入和删除能力，仅管理员网页登录会话'],
@@ -112,6 +114,7 @@ const imageResponseExample = `[
     "height": 1080,
     "album": "未分类",
     "starred": false,
+    "hotlinkProtectionEnabled": true,
     "views": 0,
     "guestUploaded": false,
     "processing": {
@@ -157,6 +160,7 @@ const videoResponseExample = `[
     "album": "视频",
     "category": "视频",
     "starred": false,
+    "hotlinkProtectionEnabled": true,
     "views": 0,
     "links": {
       "direct": "https://img.example.com/media/video/1af72c3a-8a75-4df5-b7ad-1f7cc7be4b4b/演示视频.mp4",
@@ -181,6 +185,7 @@ const imageFields = [
   ['links', '直链、Markdown、BBCode、HTML 完整引用'],
   ['width / height', '从处理后图片读取的真实像素尺寸'],
   ['filename', '原文件主体名称与实际输出扩展名组成的公开文件名'],
+  ['hotlinkProtectionEnabled', '是否允许该图片参与系统防盗链校验；默认开启，可通过图片 PATCH 接口关闭'],
 ]
 
 const videoFields = [
@@ -193,6 +198,7 @@ const videoFields = [
   ['category', '视频所属分类；上传和修改时使用，未填写时使用默认分类'],
   ['album', '兼容旧客户端的分类字段别名'],
   ['views', '通过 PicNest 媒体地址播放或读取时累计的访问次数'],
+  ['hotlinkProtectionEnabled', '是否允许该视频参与系统防盗链校验；默认开启，可通过视频 PATCH 接口关闭'],
 ]
 
 const errorStatuses = [
@@ -332,6 +338,34 @@ const buildMarkdownDocs = (baseUrl: string) => {
     '',
     '`category` 仅在最终识别为视频时使用，`album` 仅在最终识别为图片时使用；`connections` 可选，范围为 1–16。服务端会根据实际图片格式或视频扩展名/MIME 类型自动分流，任务完成后 `result` 返回对应的图片或视频对象。仅允许 HTTP/HTTPS，默认拒绝本机、局域网和其他私有地址。',
     '',
+    '## 媒体防盗链',
+    '',
+    '`GET /api/settings/hotlink-protection` 读取系统级策略；管理员网页登录会话可以使用 `PATCH /api/settings/hotlink-protection` 修改策略。图片和视频默认都开启，两个类型可以独立控制；`trustedDomains` 填写不带协议、路径或端口的域名，配置 `example.com` 后其子域名也会被允许引用。',
+    '',
+    markdownCodeBlock('json', `{
+  "imageEnabled": true,
+  "videoEnabled": true,
+  "trustedDomains": ["player.example.com", "cdn.example.com"]
+}`),
+    '',
+    '单个图片或视频还可以通过各自的 PATCH 接口覆盖默认值。系统类型开关和单媒体开关需要同时开启才会执行防盗链校验；关闭单媒体开关后，该媒体允许外部网站直接引用。',
+    '',
+    markdownCodeBlock('bash', `# 关闭单张图片的防盗链
+curl -X PATCH "${baseUrl}/api/images/IMAGE_ID" \\
+  -H "Authorization: Bearer pn_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"hotlinkProtectionEnabled":false}'
+
+# 开启单个视频的防盗链
+curl -X PATCH "${baseUrl}/api/videos/VIDEO_ID" \\
+  -H "Authorization: Bearer pn_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"hotlinkProtectionEnabled":true}'`),
+    '',
+    '受保护媒体会检查 `Referer`、`Origin` 和浏览器的跨站请求标记：站内来源、可信域名及其子域名允许；无来源的直接访问默认允许，以兼容 curl、播放器和隐私浏览器；明确的外部来源返回 `403`。视频的 Range 请求也使用同一规则。',
+    '',
+    '防盗链开启时媒体响应使用 `Cache-Control: private, no-store`，并返回按来源变化的 `Vary`，避免 CDN 将一个允许来源的响应复用给其他来源。若前置 CDN 会直接缓存或回源策略覆盖响应头，还应在 CDN 层同步配置防盗链规则。此功能主要防止网页盗嵌，不能替代登录授权或签名 URL。',
+    '',
     '## 图片对象完整响应',
     '',
     '`POST /api/images` 和 `GET /api/images` 返回图片对象数组；`GET /api/images/:id`、修改接口和游客上传中的单个元素使用同一字段结构。成功上传的 HTTP 状态为 `201`。',
@@ -446,6 +480,7 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
           <a href="#api-doc-auth">身份认证</a>
           <a href="#api-doc-upload">上传图片</a>
           <a href="#api-doc-remote-import">远程导入</a>
+          <a href="#api-doc-hotlink-protection">媒体防盗链</a>
           <a href="#api-doc-response">图片对象</a>
           <a href="#api-doc-video-upload">上传视频</a>
           <a href="#api-doc-video-response">视频对象</a>
@@ -499,6 +534,30 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
             <p><code>POST /api/remote-imports</code> 接收 JSON 中的 <code>url</code> 或 <code>source</code>，由 PicNest 服务器直接下载远程 HTTP/HTTPS 媒体。支持 Bearer API 密钥或网页登录会话；接口立即返回 <code>202</code> 和任务对象，客户端应使用 <code>GET /api/remote-imports/:id</code> 轮询状态。</p>
             <ApiCode>{remoteImportCurlExample(baseUrl)}</ApiCode>
             <p><code>category</code> 仅在最终识别为视频时使用，<code>album</code> 仅在最终识别为图片时使用；<code>connections</code> 可选，范围为 1–16。服务端会根据实际图片格式或视频扩展名/MIME 类型自动分流，任务完成后 <code>result</code> 返回对应的图片或视频对象。仅允许 HTTP/HTTPS，默认拒绝本机、局域网和其他私有地址。</p>
+          </section>
+
+          <section id="api-doc-hotlink-protection">
+            <h3>媒体防盗链</h3>
+            <p><code>GET /api/settings/hotlink-protection</code> 读取系统级策略；管理员网页登录会话可以使用 <code>PATCH /api/settings/hotlink-protection</code> 修改策略。图片和视频默认都开启，两个类型可以独立控制；<code>trustedDomains</code> 填写不带协议、路径或端口的域名，配置 <code>example.com</code> 后其子域名也会被允许引用。</p>
+            <ApiCode>{`{
+  "imageEnabled": true,
+  "videoEnabled": true,
+  "trustedDomains": ["player.example.com", "cdn.example.com"]
+}`}</ApiCode>
+            <p>单个图片或视频还可以通过各自的 PATCH 接口覆盖默认值。系统类型开关和单媒体开关需要同时开启才会执行防盗链校验；关闭单媒体开关后，该媒体允许外部网站直接引用。</p>
+            <ApiCode>{`# 关闭单张图片的防盗链
+curl -X PATCH "${baseUrl}/api/images/IMAGE_ID" \\
+  -H "Authorization: Bearer pn_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"hotlinkProtectionEnabled":false}'
+
+# 开启单个视频的防盗链
+curl -X PATCH "${baseUrl}/api/videos/VIDEO_ID" \\
+  -H "Authorization: Bearer pn_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"hotlinkProtectionEnabled":true}'`}</ApiCode>
+            <p>受保护媒体会检查 <code>Referer</code>、<code>Origin</code> 和浏览器的跨站请求标记：站内来源、可信域名及其子域名允许；无来源的直接访问默认允许，以兼容 curl、播放器和隐私浏览器；明确的外部来源返回 <code>403</code>。视频的 Range 请求也使用同一规则。</p>
+            <p className="api-doc-note">防盗链开启时媒体响应使用 <code>Cache-Control: private, no-store</code>，并返回按来源变化的 <code>Vary</code>，避免 CDN 将一个允许来源的响应复用给其他来源。若前置 CDN 会直接缓存或回源策略覆盖响应头，还应在 CDN 层同步配置防盗链规则。此功能主要防止网页盗嵌，不能替代登录授权或签名 URL。</p>
           </section>
 
           <section id="api-doc-video-response">
