@@ -39,7 +39,11 @@ const configuredVideoMaxMb = Number(process.env.PICNEST_VIDEO_MAX_MB || 500)
 const videoMaxBytes = Number.isFinite(configuredVideoMaxMb) && configuredVideoMaxMb > 0
   ? Math.floor(configuredVideoMaxMb * 1024 * 1024)
   : 500 * 1024 * 1024
-const remoteMaxBytes = Math.max(20 * 1024 * 1024, videoMaxBytes)
+const configuredFileMaxMb = Number(process.env.PICNEST_FILE_MAX_MB || 1024)
+const fileMaxBytes = Number.isFinite(configuredFileMaxMb) && configuredFileMaxMb > 0
+  ? Math.floor(configuredFileMaxMb * 1024 * 1024)
+  : 1024 * 1024 * 1024
+const remoteMaxBytes = Math.max(20 * 1024 * 1024, videoMaxBytes, fileMaxBytes)
 const configuredRemoteMaxActive = Number(process.env.PICNEST_REMOTE_MAX_ACTIVE || 2)
 const remoteMaxActive = Number.isInteger(configuredRemoteMaxActive) && configuredRemoteMaxActive > 0
   ? Math.min(configuredRemoteMaxActive, 8)
@@ -156,6 +160,25 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_videos_owner_created ON videos(owner_id, created_at DESC);
 
+  CREATE TABLE IF NOT EXISTS files (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    filename TEXT,
+    storage_provider_id TEXT,
+    storage_key TEXT,
+    url TEXT NOT NULL,
+    type TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    size INTEGER NOT NULL DEFAULT 0,
+    group_name TEXT NOT NULL DEFAULT '文件',
+    starred INTEGER NOT NULL DEFAULT 0,
+    views INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_files_owner_created ON files(owner_id, created_at DESC);
+
   CREATE TABLE IF NOT EXISTS albums (
     id TEXT PRIMARY KEY,
     owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -175,6 +198,17 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_video_categories_owner_created ON video_categories(owner_id, created_at ASC);
+
+  CREATE TABLE IF NOT EXISTS file_groups (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE(owner_id, name)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_file_groups_owner_created ON file_groups(owner_id, created_at ASC);
 
   CREATE TABLE IF NOT EXISTS api_keys (
     id TEXT PRIMARY KEY,
@@ -200,7 +234,7 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS media_traffic_daily (
     owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video')),
+    media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'file')),
     media_id TEXT NOT NULL,
     traffic_date TEXT NOT NULL,
     requests INTEGER NOT NULL DEFAULT 0,
@@ -220,7 +254,7 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS media_referrer_daily (
     owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video')),
+    media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'file')),
     media_id TEXT NOT NULL,
     traffic_date TEXT NOT NULL,
     referrer_host TEXT NOT NULL,
@@ -240,6 +274,71 @@ db.exec(`
 `)
 
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_storage_one_default ON storage_providers(is_default) WHERE is_default = 1')
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_file_groups_one_default_per_owner ON file_groups(owner_id) WHERE is_default = 1')
+
+const sqliteTableSql = (name) => db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(name)?.sql || ''
+const migrateMediaTrafficTypeCheck = () => {
+  if (sqliteTableSql('media_traffic_daily').includes("CHECK(media_type IN ('image', 'video'))")) {
+    db.exec(`
+      DROP INDEX IF EXISTS idx_media_traffic_owner_date;
+      ALTER TABLE media_traffic_daily RENAME TO media_traffic_daily_legacy;
+      CREATE TABLE media_traffic_daily (
+        owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'file')),
+        media_id TEXT NOT NULL,
+        traffic_date TEXT NOT NULL,
+        requests INTEGER NOT NULL DEFAULT 0,
+        bytes INTEGER NOT NULL DEFAULT 0,
+        external_requests INTEGER NOT NULL DEFAULT 0,
+        external_bytes INTEGER NOT NULL DEFAULT 0,
+        direct_requests INTEGER NOT NULL DEFAULT 0,
+        direct_bytes INTEGER NOT NULL DEFAULT 0,
+        internal_requests INTEGER NOT NULL DEFAULT 0,
+        internal_bytes INTEGER NOT NULL DEFAULT 0,
+        range_requests INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (owner_id, media_type, media_id, traffic_date)
+      );
+      INSERT OR IGNORE INTO media_traffic_daily (
+        owner_id, media_type, media_id, traffic_date, requests, bytes,
+        external_requests, external_bytes, direct_requests, direct_bytes,
+        internal_requests, internal_bytes, range_requests
+      )
+      SELECT
+        owner_id, media_type, media_id, traffic_date, requests, bytes,
+        external_requests, external_bytes, direct_requests, direct_bytes,
+        internal_requests, internal_bytes, range_requests
+      FROM media_traffic_daily_legacy;
+      DROP TABLE media_traffic_daily_legacy;
+      CREATE INDEX IF NOT EXISTS idx_media_traffic_owner_date
+        ON media_traffic_daily(owner_id, traffic_date DESC);
+    `)
+  }
+  if (sqliteTableSql('media_referrer_daily').includes("CHECK(media_type IN ('image', 'video'))")) {
+    db.exec(`
+      DROP INDEX IF EXISTS idx_media_referrer_owner_date;
+      ALTER TABLE media_referrer_daily RENAME TO media_referrer_daily_legacy;
+      CREATE TABLE media_referrer_daily (
+        owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'file')),
+        media_id TEXT NOT NULL,
+        traffic_date TEXT NOT NULL,
+        referrer_host TEXT NOT NULL,
+        requests INTEGER NOT NULL DEFAULT 0,
+        bytes INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (owner_id, media_type, media_id, traffic_date, referrer_host)
+      );
+      INSERT OR IGNORE INTO media_referrer_daily (
+        owner_id, media_type, media_id, traffic_date, referrer_host, requests, bytes
+      )
+      SELECT owner_id, media_type, media_id, traffic_date, referrer_host, requests, bytes
+      FROM media_referrer_daily_legacy;
+      DROP TABLE media_referrer_daily_legacy;
+      CREATE INDEX IF NOT EXISTS idx_media_referrer_owner_date
+        ON media_referrer_daily(owner_id, traffic_date DESC);
+    `)
+  }
+}
+migrateMediaTrafficTypeCheck()
 
 const userColumns = db.prepare('PRAGMA table_info(users)').all()
 if (!userColumns.some((column) => column.name === 'storage_provider_id')) {
@@ -415,12 +514,58 @@ const videoMimeTypesByFormat = {
   mkv: 'video/x-matroska',
 }
 const allowedVideoExtensions = Object.freeze(Object.keys(videoMimeTypesByFormat))
+const fileMimeTypesByFormat = {
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  txt: 'text/plain',
+  csv: 'text/csv',
+  md: 'text/markdown',
+  json: 'application/json',
+  xml: 'application/xml',
+  yaml: 'application/yaml',
+  yml: 'application/yaml',
+  rtf: 'application/rtf',
+  epub: 'application/epub+zip',
+  zip: 'application/zip',
+  rar: 'application/vnd.rar',
+  '7z': 'application/x-7z-compressed',
+  tar: 'application/x-tar',
+  gz: 'application/gzip',
+  psd: 'image/vnd.adobe.photoshop',
+  ai: 'application/postscript',
+  sketch: 'application/octet-stream',
+  fig: 'application/octet-stream',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  aac: 'audio/aac',
+  flac: 'audio/flac',
+  js: 'text/javascript',
+  ts: 'text/typescript',
+  css: 'text/css',
+  html: 'text/html',
+  htm: 'text/html',
+  sql: 'application/sql',
+  log: 'text/plain',
+}
+const allowedFileExtensions = Object.freeze(Object.keys(fileMimeTypesByFormat))
 const videoFormatFor = (row) => {
   const storedType = String(row.type || '').trim().toLowerCase().replace(/^video\//, '').replace(/^\./, '')
   if (allowedVideoExtensions.includes(storedType)) return storedType
   const filenameExtension = path.extname(row.filename || row.name || '').slice(1).toLowerCase()
   return allowedVideoExtensions.includes(filenameExtension) ? filenameExtension : ''
 }
+const fileFormatFor = (row) => {
+  const storedType = String(row.type || '').trim().toLowerCase().replace(/^\./, '')
+  if (allowedFileExtensions.includes(storedType)) return storedType
+  const filenameExtension = path.extname(row.filename || row.name || '').slice(1).toLowerCase()
+  return allowedFileExtensions.includes(filenameExtension) ? filenameExtension : ''
+}
+const fileMimeTypeFor = (extension, fallback = '') => fileMimeTypesByFormat[extension] || fallback || 'application/octet-stream'
 const normalizeImageFormat = (value) => {
   const normalized = String(value || '').trim().toLowerCase().replace(/^image\//, '').replace(/^\./, '')
   return formatAliases[normalized] || normalized || 'image'
@@ -447,6 +592,15 @@ const publicVideoFilename = (row) => {
   return `${stem}.${format}`
 }
 const managedVideoPath = (row) => `/media/video/${row.id}/${encodeURIComponent(publicVideoFilename(row))}`
+const publicFileFilename = (row) => {
+  const name = normalizeUploadFilename(row.name || row.filename || `file-${row.id}`)
+  const format = fileFormatFor(row)
+  const currentExtension = path.extname(name).slice(1).toLowerCase()
+  if (!format || currentExtension === format) return name
+  const stem = path.basename(name, path.extname(name))
+  return `${stem}.${format}`
+}
+const managedFilePath = (row) => `/media/file/${row.id}/${encodeURIComponent(publicFileFilename(row))}`
 const requestOrigin = (req) => {
   if (configuredPublicUrl) return configuredPublicUrl
   if (!req) return ''
@@ -658,6 +812,37 @@ const mapVideo = (row, req) => {
   }
 }
 
+const mapFile = (row, req) => {
+  const name = normalizeUploadFilename(row.name)
+  const format = fileFormatFor(row)
+  const filename = publicFileFilename(row)
+  const relativeUrl = row.storage_provider_id && (row.storage_key || row.filename) ? managedFilePath(row) : row.url
+  const url = absolutePublicUrl(relativeUrl, req)
+  return {
+    id: row.id,
+    name,
+    filename,
+    url,
+    path: relativeUrl,
+    type: format ? format.toUpperCase() : 'FILE',
+    format,
+    extension: path.extname(filename).toLowerCase(),
+    mimeType: fileMimeTypeFor(format, row.mime_type),
+    size: Number(row.size),
+    group: row.group_name || '文件',
+    groupName: row.group_name || '文件',
+    starred: Boolean(row.starred),
+    views: Number(row.views),
+    links: {
+      direct: url,
+      markdown: `[${escapeReferenceText(name)}](${url})`,
+      bbcode: `[url=${url}]${escapeReferenceText(name)}[/url]`,
+      html: `<a href="${escapeReferenceAttribute(url)}" download>${escapeReferenceAttribute(name)}</a>`,
+    },
+    createdAt: row.created_at,
+  }
+}
+
 const hashApiKey = (value) => crypto.createHash('sha256').update(value).digest('hex')
 const apiKeyEncryptionKey = crypto.createHash('sha256').update(String(storageEncryptionSecret)).digest()
 const encryptApiKeySecret = (value) => {
@@ -690,6 +875,16 @@ const validateVideoFilename = (filename, mimetype = '') => {
   const normalizedMime = String(mimetype || '').toLowerCase().split(';', 1)[0]
   if (normalizedMime && normalizedMime !== 'application/octet-stream' && normalizedMime !== videoMimeTypesByFormat[extension]) {
     throw new ImageProcessingError(`视频文件类型与 .${extension} 扩展名不匹配`, 400)
+  }
+  return extension
+}
+
+const validateFileFilename = (filename) => {
+  const normalizedFilename = String(filename || '')
+  if (normalizedFilename.length > 255) throw new ImageProcessingError('文件名不能超过 255 个字符', 400)
+  const extension = path.extname(normalizedFilename).replace(/^\./, '').toLowerCase()
+  if (!extension || !allowedFileExtensions.includes(extension)) {
+    throw new ImageProcessingError(`不允许上传 .${extension || '无扩展名'} 文件，允许类型：${allowedFileExtensions.map((item) => item.toUpperCase()).join('、')}`, 400)
   }
   return extension
 }
@@ -779,9 +974,47 @@ const ensureVideoCategories = (ownerId) => {
   return defaultName
 }
 
+const ensureFileGroup = (ownerId, name) => {
+  const normalizedName = String(name || '').trim()
+  if (!validAlbumName(normalizedName)) return null
+  db.prepare('INSERT OR IGNORE INTO file_groups (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)')
+    .run(crypto.randomUUID(), ownerId, normalizedName, new Date().toISOString())
+  return normalizedName
+}
+
+const ensureDefaultFileGroup = (ownerId) => {
+  let group = db.prepare(`
+    SELECT id, name FROM file_groups WHERE owner_id = ?
+    ORDER BY is_default DESC, CASE WHEN name = '文件' THEN 0 ELSE 1 END, created_at ASC, id ASC LIMIT 1
+  `).get(ownerId)
+  if (!group) {
+    group = { id: crypto.randomUUID(), name: '文件' }
+    db.prepare('INSERT INTO file_groups (id, owner_id, name, is_default, created_at) VALUES (?, ?, ?, 1, ?)')
+      .run(group.id, ownerId, group.name, new Date().toISOString())
+    return group.name
+  }
+
+  db.prepare('UPDATE file_groups SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END WHERE owner_id = ?')
+    .run(group.id, ownerId)
+  return group.name
+}
+
+const ensureFileGroups = (ownerId) => {
+  const defaultName = ensureDefaultFileGroup(ownerId)
+  db.prepare(`
+    UPDATE files SET group_name = ?
+    WHERE owner_id = ? AND (group_name IS NULL OR TRIM(group_name) = '')
+  `).run(defaultName, ownerId)
+  for (const row of db.prepare('SELECT DISTINCT group_name AS name FROM files WHERE owner_id = ?').all(ownerId)) {
+    ensureFileGroup(ownerId, row.name)
+  }
+  return defaultName
+}
+
 for (const existingUser of db.prepare('SELECT id FROM users').all()) {
   ensureDefaultAlbum(existingUser.id)
   ensureVideoCategories(existingUser.id)
+  ensureFileGroups(existingUser.id)
 }
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_video_categories_one_default_per_owner ON video_categories(owner_id) WHERE is_default = 1')
 
@@ -883,6 +1116,7 @@ const createUser = ({ name, email, password, role, quota, storageProviderId = nu
     .run(id, name.trim(), safeEmail(email), passwordHash, role, storageQuota, storageProviderId, createdAt)
   ensureDefaultAlbum(id)
   ensureDefaultVideoCategory(id)
+  ensureDefaultFileGroup(id)
   return mapUser(db.prepare('SELECT * FROM users WHERE id = ?').get(id))
 }
 
@@ -912,9 +1146,11 @@ const getUserSummary = (id) => {
     SELECT users.*,
       (SELECT COUNT(*) FROM images WHERE images.owner_id = users.id) AS image_count,
       (SELECT COUNT(*) FROM videos WHERE videos.owner_id = users.id) AS video_count,
+      (SELECT COUNT(*) FROM files WHERE files.owner_id = users.id) AS file_count,
       (
         COALESCE((SELECT SUM(size) FROM images WHERE images.owner_id = users.id), 0)
         + COALESCE((SELECT SUM(size) FROM videos WHERE videos.owner_id = users.id), 0)
+        + COALESCE((SELECT SUM(size) FROM files WHERE files.owner_id = users.id), 0)
       ) AS storage_used
     FROM users
     WHERE users.id = ?
@@ -923,6 +1159,7 @@ const getUserSummary = (id) => {
     ...mapUser(row),
     imageCount: Number(row.image_count),
     videoCount: Number(row.video_count),
+    fileCount: Number(row.file_count),
     storageUsed: Number(row.storage_used),
   } : null
 }
@@ -930,8 +1167,9 @@ const getUserSummary = (id) => {
 const getUserStorageUsed = (userId) => Number(db.prepare(`
   SELECT
     COALESCE((SELECT SUM(size) FROM images WHERE owner_id = ?), 0)
-    + COALESCE((SELECT SUM(size) FROM videos WHERE owner_id = ?), 0) AS used
-`).get(userId, userId).used)
+    + COALESCE((SELECT SUM(size) FROM videos WHERE owner_id = ?), 0)
+    + COALESCE((SELECT SUM(size) FROM files WHERE owner_id = ?), 0) AS used
+`).get(userId, userId, userId).used)
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadTempDir),
@@ -978,6 +1216,19 @@ const videoUpload = multer({
   fileFilter: (_req, file, cb) => {
     try {
       validateVideoFilename(normalizeUploadFilename(file.originalname), file.mimetype)
+      cb(null, true)
+    } catch (error) {
+      cb(error)
+    }
+  },
+})
+
+const fileUpload = multer({
+  storage,
+  limits: { fileSize: fileMaxBytes, files: 20 },
+  fileFilter: (_req, file, cb) => {
+    try {
+      validateFileFilename(normalizeUploadFilename(file.originalname))
       cb(null, true)
     } catch (error) {
       cb(error)
@@ -1078,7 +1329,10 @@ const persistUploadedVideos = async ({ files, user, request, category }) => {
   const stored = []
   let reservedBytes = 0
   try {
-    for (const file of files) validateVideoFilename(file.originalname, file.mimetype)
+    for (const file of files) {
+      validateVideoFilename(file.originalname, file.mimetype)
+      if (file.size > videoMaxBytes) throw new ImageProcessingError(`单个视频不能超过 ${Math.round(videoMaxBytes / 1024 / 1024)}MB`, 413)
+    }
     const used = getUserStorageUsed(user.id)
     const incoming = files.reduce((sum, file) => sum + file.size, 0)
     const pendingSize = uploadReservations.get(user.id) || 0
@@ -1143,8 +1397,82 @@ const persistUploadedVideos = async ({ files, user, request, category }) => {
   }
 }
 
+const persistUploadedGeneralFiles = async ({ files, user, request, group }) => {
+  const providerId = storageManager.getUploadProviderId(user.storageProviderId)
+  const stored = []
+  let reservedBytes = 0
+  try {
+    for (const file of files) {
+      validateFileFilename(file.originalname)
+      if (file.size > fileMaxBytes) throw new ImageProcessingError(`单个文件不能超过 ${Math.round(fileMaxBytes / 1024 / 1024)}MB`, 413)
+    }
+    const used = getUserStorageUsed(user.id)
+    const incoming = files.reduce((sum, file) => sum + file.size, 0)
+    const pendingSize = uploadReservations.get(user.id) || 0
+    if (used + pendingSize + incoming > user.quota) throw new ImageProcessingError('文件超过存储配额，请清理空间后重试', 413)
+    reservedBytes = incoming
+    uploadReservations.set(user.id, pendingSize + reservedBytes)
+
+    for (const file of files) {
+      const location = await storageManager.storeFile(user.id, file, providerId, 'file')
+      stored.push({ file, location })
+    }
+
+    const insert = db.prepare(`
+      INSERT INTO files (
+        id, owner_id, name, filename, storage_provider_id, storage_key, url, type, mime_type,
+        size, group_name, starred, views, created_at
+      ) VALUES (
+        @id, @ownerId, @name, @filename, @storageProviderId, @storageKey, @url, @type, @mimeType,
+        @size, @groupName, 0, 0, @createdAt
+      )
+    `)
+    const created = []
+    const transaction = db.transaction(() => {
+      ensureFileGroup(user.id, group)
+      for (const { file, location } of stored) {
+        const fileId = crypto.randomUUID()
+        const format = validateFileFilename(file.originalname)
+        const item = {
+          id: fileId,
+          ownerId: user.id,
+          name: file.originalname,
+          filename: file.filename,
+          storageProviderId: location.providerId,
+          storageKey: location.storageKey,
+          url: managedFilePath({ id: fileId, name: file.originalname, filename: file.filename, type: format }),
+          type: format,
+          mimeType: fileMimeTypeFor(format, file.mimetype),
+          size: file.size,
+          groupName: group || '文件',
+          createdAt: new Date().toISOString(),
+        }
+        insert.run(item)
+        created.push(mapFile(db.prepare('SELECT * FROM files WHERE id = ?').get(item.id), request))
+      }
+    })
+    transaction()
+    return created
+  } catch (error) {
+    await Promise.allSettled(stored.map(({ file, location }) => storageManager.deleteStoredObject({
+      owner_id: user.id,
+      filename: file.filename,
+      storage_provider_id: location.providerId,
+      storage_key: location.storageKey,
+    })))
+    cleanupPendingFiles(files)
+    throw error
+  } finally {
+    if (reservedBytes > 0) {
+      const remaining = (uploadReservations.get(user.id) || reservedBytes) - reservedBytes
+      if (remaining > 0) uploadReservations.set(user.id, remaining)
+      else uploadReservations.delete(user.id)
+    }
+  }
+}
+
 const remoteImportTasks = new Map()
-const activeRemoteTask = (task) => ['queued', 'downloading', 'detecting', 'storing'].includes(task.status)
+const activeRemoteTask = (task) => ['queued', 'downloading', 'processing'].includes(task.status)
 const remoteSourceLabel = (url) => {
   try {
     const parsed = new URL(url)
@@ -1180,7 +1508,11 @@ const updateRemoteTask = (task, changes) => {
 
 const remoteExtensionForMime = (mimeType, mediaTypes) => {
   const normalized = String(mimeType || '').toLowerCase().split(';', 1)[0]
-  const table = mediaTypes === 'image' ? mimeTypesByFormat : videoMimeTypesByFormat
+  const table = mediaTypes === 'image'
+    ? mimeTypesByFormat
+    : mediaTypes === 'video'
+      ? videoMimeTypesByFormat
+      : fileMimeTypesByFormat
   return Object.entries(table).find(([, mime]) => mime === normalized)?.[0] || ''
 }
 
@@ -1197,10 +1529,13 @@ const prepareRemoteFile = async ({ filePath, filename, contentType, taskId }) =>
   const videoExtension = allowedVideoExtensions.includes(sourceExtension)
     ? sourceExtension
     : remoteExtensionForMime(contentType, 'video')
-  const extension = imageExtension || videoExtension
-  const mediaType = imageExtension ? 'image' : videoExtension ? 'video' : ''
+  const fileExtension = allowedFileExtensions.includes(sourceExtension)
+    ? sourceExtension
+    : remoteExtensionForMime(contentType, 'file')
+  const extension = imageExtension || videoExtension || fileExtension
+  const mediaType = imageExtension ? 'image' : videoExtension ? 'video' : fileExtension ? 'file' : ''
   if (!mediaType || !extension) {
-    throw new ImageProcessingError(`无法识别远程文件格式，仅支持图片（${imageSettings.allowedExtensions.join('、').toUpperCase()}）或视频（${allowedVideoExtensions.join('、').toUpperCase()}）`, 400)
+    throw new ImageProcessingError(`无法识别远程文件格式，仅支持图片（${imageSettings.allowedExtensions.join('、').toUpperCase()}）、视频（${allowedVideoExtensions.join('、').toUpperCase()}）或文件（${allowedFileExtensions.join('、').toUpperCase()}）`, 400)
   }
 
   const normalizedFilename = normalizeUploadFilename(filename)
@@ -1211,7 +1546,9 @@ const prepareRemoteFile = async ({ filePath, filename, contentType, taskId }) =>
   const storedFilename = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${storedStem}.${extension}`
   const mimetype = mediaType === 'image'
     ? mimeTypesByFormat[extension] || contentType || 'application/octet-stream'
-    : videoMimeTypesByFormat[extension] || contentType || 'application/octet-stream'
+    : mediaType === 'video'
+      ? videoMimeTypesByFormat[extension] || contentType || 'application/octet-stream'
+      : fileMimeTypeFor(extension, contentType)
   const stat = fs.statSync(filePath)
   return {
     fieldname: 'files',
@@ -1294,12 +1631,19 @@ const runRemoteImport = async (task) => {
           request: task.request,
           processingSettings: getImageProcessingSettings(),
         })
-      : await persistUploadedVideos({
-          files: [file],
-          user: task.user,
-          request: task.request,
-          category: task.category,
-        })
+      : file.mediaType === 'video'
+        ? await persistUploadedVideos({
+            files: [file],
+            user: task.user,
+            request: task.request,
+            category: task.category,
+          })
+        : await persistUploadedGeneralFiles({
+            files: [file],
+            user: task.user,
+            request: task.request,
+            group: task.fileGroup,
+          })
     updateRemoteTask(task, {
       status: 'completed',
       phase: 'completed',
@@ -1394,17 +1738,18 @@ app.use('/api', (_req, res, next) => {
 })
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'PicNest', database: 'sqlite' }))
 
-const streamManagedMedia = async (req, res, { table, filenameFor, missingMessage, failureMessage }) => {
+const streamManagedMedia = async (req, res, { table, filenameFor, missingMessage, failureMessage, mediaType, disposition = 'inline' }) => {
   const media = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(req.params.id)
   if (!media || !media.storage_provider_id || (!media.storage_key && !media.filename)) {
     return res.status(404).json({ message: missingMessage })
   }
 
-  const mediaType = table === 'videos' ? 'video' : 'image'
+  const resolvedMediaType = mediaType || (table === 'videos' ? 'video' : table === 'files' ? 'file' : 'image')
+  const mediaLabel = resolvedMediaType === 'video' ? '视频' : resolvedMediaType === 'file' ? '文件' : '图片'
   const hotlinkSettings = getHotlinkProtectionSettings()
-  const hotlinkProtectionEnabled = hotlinkSettings[`${mediaType}Enabled`] && media.hotlink_protection_enabled !== 0
+  const hotlinkProtectionEnabled = resolvedMediaType !== 'file' && hotlinkSettings[`${resolvedMediaType}Enabled`] && media.hotlink_protection_enabled !== 0
   if (hotlinkProtectionEnabled && !hotlinkRequestAllowed(req, hotlinkSettings)) {
-    return res.status(403).json({ message: `该${mediaType === 'video' ? '视频' : '图片'}已启用防盗链，仅允许站内或已配置的可信域名访问` })
+    return res.status(403).json({ message: `该${mediaLabel}已启用防盗链，仅允许站内或已配置的可信域名访问` })
   }
 
   res.setHeader('Accept-Ranges', 'bytes')
@@ -1419,7 +1764,7 @@ const streamManagedMedia = async (req, res, { table, filenameFor, missingMessage
     const etag = object.etag || `"${media.id}"`
 
     res.setHeader('Content-Type', object.contentType || media.mime_type || 'application/octet-stream')
-    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(filenameFor(media))}`)
+    res.setHeader('Content-Disposition', `${disposition}; filename*=UTF-8''${encodeURIComponent(filenameFor(media))}`)
     res.setHeader('Cache-Control', hotlinkProtectionEnabled ? 'private, no-store' : 'public, max-age=31536000, immutable')
     if (hotlinkProtectionEnabled) res.setHeader('Vary', 'Referer, Origin, Sec-Fetch-Site')
     res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'")
@@ -1456,7 +1801,7 @@ const streamManagedMedia = async (req, res, { table, filenameFor, missingMessage
       trafficRecorded = true
       recordMediaTraffic({
         media,
-        mediaType: table === 'videos' ? 'video' : 'image',
+        mediaType: resolvedMediaType,
         req,
         bytes: streamedBytes,
       })
@@ -1472,7 +1817,7 @@ const streamManagedMedia = async (req, res, { table, filenameFor, missingMessage
       cleanup()
       recordTraffic()
       if (res.headersSent) res.destroy(error)
-      else res.status(502).json({ message: '图片读取失败' })
+      else res.status(502).json({ message: `${failureMessage}读取失败` })
     })
     object.body.pipe(res)
   } catch (error) {
@@ -1488,6 +1833,7 @@ const streamManagedImage = (req, res) => streamManagedMedia(req, res, {
   filenameFor: publicImageFilename,
   missingMessage: '图片不存在',
   failureMessage: '图片',
+  mediaType: 'image',
 })
 
 const streamManagedVideo = (req, res) => streamManagedMedia(req, res, {
@@ -1495,8 +1841,20 @@ const streamManagedVideo = (req, res) => streamManagedMedia(req, res, {
   filenameFor: publicVideoFilename,
   missingMessage: '视频不存在',
   failureMessage: '视频',
+  mediaType: 'video',
 })
 
+const streamManagedFile = (req, res) => streamManagedMedia(req, res, {
+  table: 'files',
+  filenameFor: publicFileFilename,
+  missingMessage: '文件不存在',
+  failureMessage: '文件',
+  mediaType: 'file',
+  disposition: 'attachment',
+})
+
+app.get('/media/file/:id', streamManagedFile)
+app.get('/media/file/:id/:filename', streamManagedFile)
 app.get('/media/video/:id', streamManagedVideo)
 app.get('/media/video/:id/:filename', streamManagedVideo)
 app.get('/media/:id', streamManagedImage)
@@ -1512,6 +1870,9 @@ app.get('/api/public/config', (_req, res) => {
     videoMaxFileSize: videoMaxBytes,
     videoMaxFiles: 10,
     videoExtensions: allowedVideoExtensions,
+    fileMaxFileSize: fileMaxBytes,
+    fileMaxFiles: 20,
+    fileExtensions: allowedFileExtensions,
   })
 })
 
@@ -1638,9 +1999,11 @@ app.get('/api/users', authenticate, requireSessionAuth, requireAdmin, (_req, res
     SELECT users.*,
       (SELECT COUNT(*) FROM images WHERE images.owner_id = users.id) AS image_count,
       (SELECT COUNT(*) FROM videos WHERE videos.owner_id = users.id) AS video_count,
+      (SELECT COUNT(*) FROM files WHERE files.owner_id = users.id) AS file_count,
       (
         COALESCE((SELECT SUM(size) FROM images WHERE images.owner_id = users.id), 0)
         + COALESCE((SELECT SUM(size) FROM videos WHERE videos.owner_id = users.id), 0)
+        + COALESCE((SELECT SUM(size) FROM files WHERE files.owner_id = users.id), 0)
       ) AS storage_used
     FROM users
     ORDER BY users.created_at ASC
@@ -1649,6 +2012,7 @@ app.get('/api/users', authenticate, requireSessionAuth, requireAdmin, (_req, res
     ...mapUser(row),
     imageCount: Number(row.image_count),
     videoCount: Number(row.video_count),
+    fileCount: Number(row.file_count),
     storageUsed: Number(row.storage_used),
   })))
 })
@@ -1667,7 +2031,7 @@ app.post('/api/users', authenticate, requireSessionAuth, requireAdmin, (req, res
   if (storageProviderId === undefined) return res.status(400).json({ message: '选择的存储策略不存在' })
   if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) return res.status(409).json({ message: '该邮箱已经存在' })
   const user = createUser({ name, email, password, role, quota, storageProviderId })
-  res.status(201).json({ ...user, imageCount: 0, videoCount: 0, storageUsed: 0 })
+  res.status(201).json({ ...user, imageCount: 0, videoCount: 0, fileCount: 0, storageUsed: 0 })
 })
 
 app.patch('/api/users/:id', authenticate, requireSessionAuth, requireAdmin, (req, res) => {
@@ -1804,6 +2168,35 @@ app.post('/api/videos', authenticate, videoUpload.array('files', 10), async (req
   res.status(201).json(created)
 })
 
+app.get('/api/files', authenticate, (req, res) => {
+  const files = db.prepare('SELECT * FROM files WHERE owner_id = ? ORDER BY created_at DESC').all(req.user.id)
+  res.json(files.map((file) => mapFile(file, req)))
+})
+
+app.get('/api/files/:id', authenticate, (req, res) => {
+  const file = db.prepare('SELECT * FROM files WHERE id = ? AND owner_id = ?').get(req.params.id, req.user.id)
+  if (!file) return res.status(404).json({ message: '文件不存在' })
+  res.json(mapFile(file, req))
+})
+
+app.post('/api/files', authenticate, fileUpload.array('files', 20), async (req, res) => {
+  if (!req.files?.length) return res.status(400).json({ message: '请选择需要上传的文件' })
+  const requestedGroup = String(req.body.group || req.body.groupName || '').trim()
+  if (requestedGroup && !validAlbumName(requestedGroup)) {
+    cleanupPendingFiles(req.files)
+    return res.status(400).json({ message: '文件分组名称需要 1 到 100 个字符' })
+  }
+  const group = requestedGroup || ensureDefaultFileGroup(req.user.id)
+  ensureFileGroup(req.user.id, group)
+  const created = await persistUploadedGeneralFiles({
+    files: req.files,
+    user: req.user,
+    request: req,
+    group,
+  })
+  res.status(201).json(created)
+})
+
 app.post('/api/remote-imports', authenticate, (req, res) => {
   const activeCount = Array.from(remoteImportTasks.values())
     .filter((task) => task.ownerId === req.user.id && activeRemoteTask(task)).length
@@ -1821,8 +2214,10 @@ app.post('/api/remote-imports', authenticate, (req, res) => {
 
   const requestedAlbum = String(req.body.album || '').trim()
   const requestedCategory = String(req.body.category || '').trim()
+  const requestedFileGroup = String(req.body.fileGroup || req.body.group || '').trim()
   if (requestedAlbum && !validAlbumName(requestedAlbum)) return res.status(400).json({ message: '相册名称需要 1 到 100 个字符' })
   if (requestedCategory && !validAlbumName(requestedCategory)) return res.status(400).json({ message: '视频分类名称需要 1 到 100 个字符' })
+  if (requestedFileGroup && !validAlbumName(requestedFileGroup)) return res.status(400).json({ message: '文件分组名称需要 1 到 100 个字符' })
   const connections = Number(req.body.connections || remoteDownloadDefaults.defaultConnections)
   if (!Number.isInteger(connections) || connections < 1 || connections > remoteDownloadDefaults.maxConnections) {
     return res.status(400).json({ message: `下载连接数需要是 1 到 ${remoteDownloadDefaults.maxConnections} 的整数` })
@@ -1837,6 +2232,7 @@ app.post('/api/remote-imports', authenticate, (req, res) => {
     sourceLabel: remoteSourceLabel(parsed.url),
     album: requestedAlbum || ensureDefaultAlbum(req.user.id),
     category: requestedCategory || ensureDefaultVideoCategory(req.user.id),
+    fileGroup: requestedFileGroup || ensureDefaultFileGroup(req.user.id),
     connections,
     status: 'queued',
     phase: 'queued',
@@ -1907,6 +2303,48 @@ app.post('/api/videos/bulk-delete', authenticate, async (req, res) => {
   if (!ids.size) return res.status(400).json({ message: '视频 ID 格式无效' })
   const owned = db.prepare('SELECT * FROM videos WHERE owner_id = ?').all(req.user.id).filter((video) => ids.has(video.id))
   for (const video of owned) await removeOwnedVideo(video, req.user.id)
+  res.json({ deleted: owned.length })
+})
+
+app.patch('/api/files/:id', authenticate, (req, res) => {
+  const file = db.prepare('SELECT * FROM files WHERE id = ? AND owner_id = ?').get(req.params.id, req.user.id)
+  if (!file) return res.status(404).json({ message: '文件不存在' })
+  const name = Object.hasOwn(req.body, 'name') ? String(req.body.name).trim() : file.name
+  const requestedGroup = Object.hasOwn(req.body, 'group')
+    ? String(req.body.group || '').trim()
+    : Object.hasOwn(req.body, 'groupName')
+      ? String(req.body.groupName || '').trim()
+      : file.group_name || ensureDefaultFileGroup(req.user.id)
+  const group = requestedGroup || ensureDefaultFileGroup(req.user.id)
+  const starred = Object.hasOwn(req.body, 'starred') ? (req.body.starred ? 1 : 0) : file.starred
+  if (!validImageName(name)) return res.status(400).json({ message: '文件名称需要 1 到 255 个字符' })
+  if (!validAlbumName(group)) return res.status(400).json({ message: '文件分组名称需要 1 到 100 个字符' })
+  if (Object.hasOwn(req.body, 'starred') && typeof req.body.starred !== 'boolean') return res.status(400).json({ message: 'starred 必须是布尔值' })
+  ensureFileGroup(req.user.id, group)
+  db.prepare('UPDATE files SET name = ?, group_name = ?, starred = ? WHERE id = ? AND owner_id = ?')
+    .run(name, group, starred, req.params.id, req.user.id)
+  res.json(mapFile(db.prepare('SELECT * FROM files WHERE id = ?').get(req.params.id), req))
+})
+
+const removeOwnedFile = async (file, userId) => {
+  await storageManager.deleteStoredObject(file)
+  db.prepare('DELETE FROM files WHERE id = ? AND owner_id = ?').run(file.id, userId)
+}
+
+app.delete('/api/files/:id', authenticate, async (req, res) => {
+  const file = db.prepare('SELECT * FROM files WHERE id = ? AND owner_id = ?').get(req.params.id, req.user.id)
+  if (!file) return res.status(404).json({ message: '文件不存在' })
+  await removeOwnedFile(file, req.user.id)
+  res.status(204).end()
+})
+
+app.post('/api/files/bulk-delete', authenticate, async (req, res) => {
+  if (!Array.isArray(req.body.ids) || req.body.ids.length === 0) return res.status(400).json({ message: '请选择需要删除的文件' })
+  if (req.body.ids.length > 500) return res.status(400).json({ message: '单次最多删除 500 个文件' })
+  const ids = new Set(req.body.ids.filter((id) => typeof id === 'string' && id.length <= 100))
+  if (!ids.size) return res.status(400).json({ message: '文件 ID 格式无效' })
+  const owned = db.prepare('SELECT * FROM files WHERE owner_id = ?').all(req.user.id).filter((file) => ids.has(file.id))
+  for (const file of owned) await removeOwnedFile(file, req.user.id)
   res.json({ deleted: owned.length })
 })
 
@@ -2003,6 +2441,55 @@ app.patch('/api/video-categories/:id/default', authenticate, (req, res) => {
   res.json({ id: category.id, name: category.name, isDefault: true })
 })
 
+app.get('/api/file-groups', authenticate, (req, res) => {
+  ensureFileGroups(req.user.id)
+  const rows = db.prepare(`
+    SELECT file_groups.id, file_groups.name, file_groups.is_default, file_groups.created_at,
+      COUNT(files.id) AS file_count, COALESCE(SUM(files.size), 0) AS storage_used
+    FROM file_groups
+    LEFT JOIN files ON files.owner_id = file_groups.owner_id AND files.group_name = file_groups.name
+    WHERE file_groups.owner_id = ?
+    GROUP BY file_groups.id
+    ORDER BY file_groups.is_default DESC, file_groups.created_at ASC
+  `).all(req.user.id)
+  res.json(rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    isDefault: Boolean(row.is_default),
+    createdAt: row.created_at,
+    fileCount: Number(row.file_count),
+    storageUsed: Number(row.storage_used),
+  })))
+})
+
+app.post('/api/file-groups', authenticate, (req, res) => {
+  const name = String(req.body.name || '').trim()
+  if (!validAlbumName(name)) return res.status(400).json({ message: '文件分组名称需要 1 到 100 个字符' })
+  if (db.prepare('SELECT COUNT(*) AS count FROM file_groups WHERE owner_id = ?').get(req.user.id).count >= 500) {
+    return res.status(409).json({ message: '每位用户最多创建 500 个文件分组' })
+  }
+  try {
+    const group = { id: crypto.randomUUID(), name, createdAt: new Date().toISOString() }
+    db.prepare('INSERT INTO file_groups (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)')
+      .run(group.id, req.user.id, name, group.createdAt)
+    res.status(201).json({ ...group, isDefault: false, fileCount: 0, storageUsed: 0 })
+  } catch (error) {
+    if (String(error.message).includes('UNIQUE')) return res.status(409).json({ message: '文件分组名称已经存在' })
+    throw error
+  }
+})
+
+app.patch('/api/file-groups/:id/default', authenticate, (req, res) => {
+  const group = db.prepare('SELECT id, name FROM file_groups WHERE id = ? AND owner_id = ?').get(req.params.id, req.user.id)
+  if (!group) return res.status(404).json({ message: '文件分组不存在' })
+  const transaction = db.transaction(() => {
+    db.prepare('UPDATE file_groups SET is_default = 0 WHERE owner_id = ?').run(req.user.id)
+    db.prepare('UPDATE file_groups SET is_default = 1 WHERE id = ? AND owner_id = ?').run(group.id, req.user.id)
+  })
+  transaction()
+  res.json({ id: group.id, name: group.name, isDefault: true })
+})
+
 app.get('/api/albums', authenticate, (req, res) => {
   ensureDefaultAlbum(req.user.id)
   const rows = db.prepare(`
@@ -2086,11 +2573,13 @@ app.get('/api/stats', authenticate, (req, res) => {
     SELECT
       (SELECT COUNT(*) FROM images WHERE owner_id = ?) AS images,
       (SELECT COUNT(*) FROM videos WHERE owner_id = ?) AS videos,
+      (SELECT COUNT(*) FROM files WHERE owner_id = ?) AS files,
       (
         COALESCE((SELECT SUM(size) FROM images WHERE owner_id = ?), 0)
         + COALESCE((SELECT SUM(size) FROM videos WHERE owner_id = ?), 0)
+        + COALESCE((SELECT SUM(size) FROM files WHERE owner_id = ?), 0)
       ) AS used
-  `).get(req.user.id, req.user.id, req.user.id, req.user.id)
+  `).get(req.user.id, req.user.id, req.user.id, req.user.id, req.user.id, req.user.id)
   const month = getCurrentMonth()
   const usage = db.prepare(`
     SELECT calls, success_calls, failed_calls, response_ms_total, traffic_bytes
@@ -2100,6 +2589,7 @@ app.get('/api/stats', authenticate, (req, res) => {
   res.json({
     images: Number(aggregate.images),
     videos: Number(aggregate.videos),
+    files: Number(aggregate.files),
     used: Number(aggregate.used),
     limit: req.user.quota,
     traffic: Number(usage.traffic_bytes),
@@ -2153,8 +2643,8 @@ app.get('/api/analytics/traffic', authenticate, requireSessionAuth, (req, res) =
     SELECT
       traffic.media_type AS media_type,
       traffic.media_id AS media_id,
-      COALESCE(images.name, videos.name, '已删除媒体') AS name,
-      COALESCE(images.filename, videos.filename, '') AS filename,
+      COALESCE(images.name, videos.name, files.name, '已删除媒体') AS name,
+      COALESCE(images.filename, videos.filename, files.filename, '') AS filename,
       SUM(traffic.requests) AS requests,
       SUM(traffic.bytes) AS bytes,
       SUM(traffic.external_requests) AS external_requests,
@@ -2163,6 +2653,7 @@ app.get('/api/analytics/traffic', authenticate, requireSessionAuth, (req, res) =
     FROM media_traffic_daily AS traffic
     LEFT JOIN images ON traffic.media_type = 'image' AND images.id = traffic.media_id
     LEFT JOIN videos ON traffic.media_type = 'video' AND videos.id = traffic.media_id
+    LEFT JOIN files ON traffic.media_type = 'file' AND files.id = traffic.media_id
     WHERE traffic.owner_id = ? AND traffic.traffic_date BETWEEN ? AND ?
     GROUP BY traffic.media_type, traffic.media_id
     ORDER BY bytes DESC, external_bytes DESC
@@ -2273,12 +2764,23 @@ app.use((error, req, res, _next) => {
   if (error?.type === 'entity.too.large') return res.status(413).json({ message: '请求内容不能超过 1 MB' })
   if (error instanceof SyntaxError && error?.status === 400 && Object.hasOwn(error, 'body')) return res.status(400).json({ message: 'JSON 请求内容格式错误' })
   if (error instanceof multer.MulterError) {
-    const limit = req.path.startsWith('/api/public/') ? '10MB' : req.path.startsWith('/api/videos') ? `${Math.round(videoMaxBytes / 1024 / 1024)}MB` : '20MB'
+    const uploadKind = req.path.startsWith('/api/videos')
+      ? '视频'
+      : req.path.startsWith('/api/files')
+        ? '文件'
+        : '图片'
+    const limit = req.path.startsWith('/api/public/')
+      ? '10MB'
+      : req.path.startsWith('/api/videos')
+        ? `${Math.round(videoMaxBytes / 1024 / 1024)}MB`
+        : req.path.startsWith('/api/files')
+          ? `${Math.round(fileMaxBytes / 1024 / 1024)}MB`
+          : '20MB'
     const tooLarge = ['LIMIT_FILE_SIZE', 'LIMIT_FILE_COUNT'].includes(error.code)
     const message = error.code === 'LIMIT_FILE_SIZE'
-      ? `${req.path.startsWith('/api/videos') ? '单个视频' : '单张图片'}不能超过 ${limit}`
+      ? `单个${uploadKind}不能超过 ${limit}`
       : error.code === 'LIMIT_FILE_COUNT'
-        ? `单次上传图片数量超过限制`
+        ? `单次上传${uploadKind}数量超过限制`
         : '上传请求格式不正确'
     return res.status(tooLarge ? 413 : 400).json({ message })
   }
@@ -2286,7 +2788,7 @@ app.use((error, req, res, _next) => {
   if (error instanceof StorageManagerError) return res.status(error.status).json({ message: error.message })
   const remoteStorageFailure = Boolean(error?.$metadata)
     || ['AbortError', 'TimeoutError'].includes(error?.name)
-    || (error instanceof TypeError && (req.path.startsWith('/api/storage/') || req.path.includes('/images')))
+    || (error instanceof TypeError && (req.path.startsWith('/api/storage/') || req.path.includes('/images') || req.path.includes('/videos') || req.path.includes('/files')))
   if (remoteStorageFailure) {
     console.error(error)
     return res.status(502).json({ message: '远程存储操作失败，请检查地址、区域、Bucket、网络和访问密钥' })

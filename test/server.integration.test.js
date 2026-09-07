@@ -108,6 +108,11 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.equal(defaultHotlinkProtection.response.status, 200)
   assert.deepEqual(defaultHotlinkProtection.body, { imageEnabled: true, videoEnabled: true, trustedDomains: [] })
 
+  const publicConfig = await requestJson(`${baseUrl}/api/public/config`)
+  assert.equal(publicConfig.response.status, 200)
+  assert.equal(publicConfig.body.fileMaxFiles, 20)
+  assert.equal(publicConfig.body.fileExtensions.includes('pdf'), true)
+
   const invalidRemoteImport = await requestJson(`${baseUrl}/api/remote-imports`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
@@ -119,6 +124,13 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   const emptyImages = await requestJson(`${baseUrl}/api/images`, { headers: { Cookie: adminCookie } })
   assert.equal(emptyImages.response.status, 200)
   assert.deepEqual(emptyImages.body, [])
+  const emptyFiles = await requestJson(`${baseUrl}/api/files`, { headers: { Cookie: adminCookie } })
+  assert.equal(emptyFiles.response.status, 200)
+  assert.deepEqual(emptyFiles.body, [])
+  const defaultFileGroups = await requestJson(`${baseUrl}/api/file-groups`, { headers: { Cookie: adminCookie } })
+  assert.equal(defaultFileGroups.response.status, 200)
+  assert.equal(defaultFileGroups.body[0].name, '文件')
+  assert.equal(defaultFileGroups.body[0].isDefault, true)
 
   const secondRegistration = await requestJson(`${baseUrl}/api/auth/register`, {
     method: 'POST',
@@ -222,10 +234,86 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.equal(renamedImage.body.filename, '重命名图片.png')
   assert.equal(decodeURIComponent(new URL(renamedImage.body.url).pathname).endsWith('/重命名图片.png'), true)
 
+  const fileBytes = Buffer.from('PICNEST FILE DOWNLOAD TEST CONTENT')
+  const fileForm = new FormData()
+  fileForm.append('files', new Blob([fileBytes], { type: 'text/plain' }), '说明文档.txt')
+  const fileUpload = await requestJson(`${baseUrl}/api/files`, { method: 'POST', headers: { Cookie: memberCookie }, body: fileForm })
+  assert.equal(fileUpload.response.status, 201)
+  assert.equal(fileUpload.body.length, 1)
+  const uploadedFile = fileUpload.body[0]
+  assert.equal(uploadedFile.name, '说明文档.txt')
+  assert.equal(uploadedFile.filename, '说明文档.txt')
+  assert.equal(uploadedFile.type, 'TXT')
+  assert.equal(uploadedFile.format, 'txt')
+  assert.equal(uploadedFile.extension, '.txt')
+  assert.equal(uploadedFile.mimeType, 'text/plain')
+  assert.equal(uploadedFile.group, '文件')
+  assert.equal(uploadedFile.groupName, '文件')
+  assert.match(uploadedFile.url, /\/media\/file\/[^/]+\/.+\.txt$/)
+  assert.equal(uploadedFile.links.html.includes('download'), true)
+
+  const initialFileGroups = await requestJson(`${baseUrl}/api/file-groups`, { headers: { Cookie: memberCookie } })
+  assert.equal(initialFileGroups.response.status, 200)
+  assert.equal(initialFileGroups.body.length, 1)
+  assert.equal(initialFileGroups.body[0].name, '文件')
+  assert.equal(initialFileGroups.body[0].isDefault, true)
+  assert.equal(initialFileGroups.body[0].fileCount, 1)
+  assert.equal(initialFileGroups.body[0].storageUsed, fileBytes.length)
+
+  const createdFileGroup = await requestJson(`${baseUrl}/api/file-groups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: memberCookie },
+    body: JSON.stringify({ name: '项目文档' }),
+  })
+  assert.equal(createdFileGroup.response.status, 201)
+  assert.equal(createdFileGroup.body.name, '项目文档')
+  assert.equal(createdFileGroup.body.isDefault, false)
+
+  const duplicateFileGroup = await requestJson(`${baseUrl}/api/file-groups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: memberCookie },
+    body: JSON.stringify({ name: '项目文档' }),
+  })
+  assert.equal(duplicateFileGroup.response.status, 409)
+
+  const movedFile = await requestJson(`${baseUrl}/api/files/${uploadedFile.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: memberCookie },
+    body: JSON.stringify({ name: '改名.pdf', group: '项目文档', starred: true }),
+  })
+  assert.equal(movedFile.response.status, 200)
+  assert.equal(movedFile.body.name, '改名.pdf')
+  assert.equal(movedFile.body.filename, '改名.txt')
+  assert.equal(movedFile.body.groupName, '项目文档')
+  assert.equal(movedFile.body.starred, true)
+  assert.match(movedFile.body.url, /\.txt$/)
+
+  const fileDetail = await requestJson(`${baseUrl}/api/files/${uploadedFile.id}`, { headers: { Cookie: memberCookie } })
+  assert.equal(fileDetail.response.status, 200)
+  assert.equal(fileDetail.body.id, uploadedFile.id)
+  const adminFileList = await requestJson(`${baseUrl}/api/files`, { headers: { Cookie: adminCookie } })
+  assert.equal(adminFileList.response.status, 200)
+  assert.deepEqual(adminFileList.body, [])
+  const crossOwnerFileRead = await requestJson(`${baseUrl}/api/files/${uploadedFile.id}`, { headers: { Cookie: adminCookie } })
+  assert.equal(crossOwnerFileRead.response.status, 404)
+  const crossOwnerFileGroup = await requestJson(`${baseUrl}/api/file-groups/${createdFileGroup.body.id}/default`, {
+    method: 'PATCH',
+    headers: { Cookie: adminCookie },
+  })
+  assert.equal(crossOwnerFileGroup.response.status, 404)
+
+  const fileMedia = await fetch(movedFile.body.url, { headers: { Referer: 'https://files.example.test/share' } })
+  assert.equal(fileMedia.status, 200)
+  assert.equal(fileMedia.headers.get('content-type'), 'text/plain')
+  assert.match(fileMedia.headers.get('content-disposition') || '', /attachment/)
+  assert.equal(fileMedia.headers.get('accept-ranges'), 'bytes')
+  assert.deepEqual(Buffer.from(await fileMedia.arrayBuffer()), fileBytes)
+
   const statsBeforeVideo = await requestJson(`${baseUrl}/api/stats`, { headers: { Cookie: memberCookie } })
   assert.equal(statsBeforeVideo.response.status, 200)
   assert.equal(statsBeforeVideo.body.images, 1)
   assert.equal(statsBeforeVideo.body.videos, 0)
+  assert.equal(statsBeforeVideo.body.files, 1)
 
   const videoBytes = Buffer.from('PICNEST VIDEO RANGE TEST CONTENT')
   const videoForm = new FormData()
@@ -314,17 +402,19 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
 
   const imageDirectory = path.join(tempDirectory, 'media-images')
   const videoDirectory = path.join(tempDirectory, 'media-videos')
+  const fileDirectory = path.join(tempDirectory, 'media-files')
   const localStorageUpdate = await requestJson(`${baseUrl}/api/storage/providers/local`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
     body: JSON.stringify({
       name: '本地文件系统',
-      config: { imagePathPrefix: imageDirectory, videoPathPrefix: videoDirectory },
+      config: { imagePathPrefix: imageDirectory, videoPathPrefix: videoDirectory, filePathPrefix: fileDirectory },
     }),
   })
   assert.equal(localStorageUpdate.response.status, 200)
   assert.equal(localStorageUpdate.body.config.imagePathPrefix, path.normalize(imageDirectory))
   assert.equal(localStorageUpdate.body.config.videoPathPrefix, path.normalize(videoDirectory))
+  assert.equal(localStorageUpdate.body.config.filePathPrefix, path.normalize(fileDirectory))
 
   const oldImageAfterStorageUpdate = await fetch(image.url)
   assert.equal(oldImageAfterStorageUpdate.status, 200)
@@ -332,6 +422,9 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   const oldVideoAfterStorageUpdate = await fetch(video.url)
   assert.equal(oldVideoAfterStorageUpdate.status, 200)
   assert.deepEqual(Buffer.from(await oldVideoAfterStorageUpdate.arrayBuffer()), videoBytes)
+  const oldFileAfterStorageUpdate = await fetch(movedFile.body.url)
+  assert.equal(oldFileAfterStorageUpdate.status, 200)
+  assert.deepEqual(Buffer.from(await oldFileAfterStorageUpdate.arrayBuffer()), fileBytes)
 
   const videoList = await requestJson(`${baseUrl}/api/videos`, { headers: { Cookie: memberCookie } })
   assert.equal(videoList.response.status, 200)
@@ -390,15 +483,20 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   const trafficAnalytics = await requestJson(`${baseUrl}/api/analytics/traffic?days=7`, { headers: { Cookie: memberCookie } })
   assert.equal(trafficAnalytics.response.status, 200)
   assert.equal(trafficAnalytics.body.days, 7)
-  assert.equal(trafficAnalytics.body.summary.externalBytes, png.length + videoBytes.length)
+  assert.equal(trafficAnalytics.body.summary.externalBytes, png.length + videoBytes.length + fileBytes.length)
   assert.equal(trafficAnalytics.body.summary.rangeRequests, 1)
   assert.equal(trafficAnalytics.body.daily.length, 7)
   assert.equal(trafficAnalytics.body.daily.filter((item) => item.bytes > 0).length, 1)
   assert.equal(trafficAnalytics.body.referrers[0].host, 'player.example.test')
   assert.equal(trafficAnalytics.body.referrers[0].bytes, png.length + videoBytes.length)
+  const fileReferrer = trafficAnalytics.body.referrers.find((item) => item.host === 'files.example.test')
+  assert.equal(fileReferrer.bytes, fileBytes.length)
   const highestTrafficVideo = trafficAnalytics.body.topMedia.find((item) => item.mediaId === video.id)
   assert.equal(highestTrafficVideo.mediaType, 'video')
   assert.equal(highestTrafficVideo.externalBytes, videoBytes.length)
+  const topFileTraffic = trafficAnalytics.body.topMedia.find((item) => item.mediaId === uploadedFile.id)
+  assert.equal(topFileTraffic.mediaType, 'file')
+  assert.equal(topFileTraffic.externalBytes, fileBytes.length)
 
   const invalidHotlinkDomain = await requestJson(`${baseUrl}/api/settings/hotlink-protection`, {
     method: 'PATCH',
@@ -530,12 +628,23 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   const separatedVideoFiles = await fs.readdir(path.join(videoDirectory, memberId))
   assert.equal(separatedVideoFiles.length, 1)
   assert.deepEqual(await fs.readFile(path.join(videoDirectory, memberId, separatedVideoFiles[0])), videoBytes)
+  const separatedFileForm = new FormData()
+  separatedFileForm.append('files', new Blob([fileBytes], { type: 'text/plain' }), '分目录文件.txt')
+  const separatedFileUpload = await requestJson(`${baseUrl}/api/files`, { method: 'POST', headers: { Cookie: memberCookie }, body: separatedFileForm })
+  assert.equal(separatedFileUpload.response.status, 201)
+  const separatedFile = separatedFileUpload.body[0]
+  const separatedFiles = await fs.readdir(path.join(fileDirectory, memberId))
+  assert.equal(separatedFiles.length, 1)
+  assert.deepEqual(await fs.readFile(path.join(fileDirectory, memberId, separatedFiles[0])), fileBytes)
   assert.notEqual(path.resolve(imageDirectory), path.resolve(videoDirectory))
+  assert.notEqual(path.resolve(videoDirectory), path.resolve(fileDirectory))
 
   const separatedImageDeletion = await fetch(`${baseUrl}/api/images/${separatedImage.id}`, { method: 'DELETE', headers: { Cookie: memberCookie } })
   assert.equal(separatedImageDeletion.status, 204)
   const separatedVideoDeletion = await fetch(`${baseUrl}/api/videos/${separatedVideo.id}`, { method: 'DELETE', headers: { Cookie: memberCookie } })
   assert.equal(separatedVideoDeletion.status, 204)
+  const separatedFileDeletion = await fetch(`${baseUrl}/api/files/${separatedFile.id}`, { method: 'DELETE', headers: { Cookie: memberCookie } })
+  assert.equal(separatedFileDeletion.status, 204)
 
   const legacyDirectory = path.join(tempDirectory, 'legacy-media')
   const legacyStorageUpdate = await requestJson(`${baseUrl}/api/storage/providers/local`, {
@@ -546,6 +655,7 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.equal(legacyStorageUpdate.response.status, 200)
   assert.equal(legacyStorageUpdate.body.config.imagePathPrefix, path.normalize(legacyDirectory))
   assert.equal(legacyStorageUpdate.body.config.videoPathPrefix, path.normalize(legacyDirectory))
+  assert.equal(legacyStorageUpdate.body.config.filePathPrefix, path.normalize(legacyDirectory))
 
   const legacyImageForm = new FormData()
   legacyImageForm.append('files', new Blob([png], { type: 'image/png' }), '旧前缀兼容.png')
@@ -556,15 +666,25 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.deepEqual(await fs.readFile(path.join(legacyDirectory, memberId, legacyImageFiles[0])), png)
   const legacyImageDeletion = await fetch(`${baseUrl}/api/images/${legacyImageUpload.body[0].id}`, { method: 'DELETE', headers: { Cookie: memberCookie } })
   assert.equal(legacyImageDeletion.status, 204)
+  const legacyFileForm = new FormData()
+  legacyFileForm.append('files', new Blob([fileBytes], { type: 'text/plain' }), '旧前缀兼容文件.txt')
+  const legacyFileUpload = await requestJson(`${baseUrl}/api/files`, { method: 'POST', headers: { Cookie: memberCookie }, body: legacyFileForm })
+  assert.equal(legacyFileUpload.response.status, 201)
+  const legacyFiles = await fs.readdir(path.join(legacyDirectory, memberId))
+  assert.equal(legacyFiles.length, 1)
+  assert.deepEqual(await fs.readFile(path.join(legacyDirectory, memberId, legacyFiles[0])), fileBytes)
+  const legacyFileDeletion = await fetch(`${baseUrl}/api/files/${legacyFileUpload.body[0].id}`, { method: 'DELETE', headers: { Cookie: memberCookie } })
+  assert.equal(legacyFileDeletion.status, 204)
 
   const clearedStorageUpdate = await requestJson(`${baseUrl}/api/storage/providers/local`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
-    body: JSON.stringify({ config: { imagePathPrefix: '', videoPathPrefix: '' } }),
+    body: JSON.stringify({ config: { imagePathPrefix: '', videoPathPrefix: '', filePathPrefix: '' } }),
   })
   assert.equal(clearedStorageUpdate.response.status, 200)
   assert.equal(clearedStorageUpdate.body.config.imagePathPrefix, '')
   assert.equal(clearedStorageUpdate.body.config.videoPathPrefix, '')
+  assert.equal(clearedStorageUpdate.body.config.filePathPrefix, '')
 
   const apiKey = await requestJson(`${baseUrl}/api/api-keys`, {
     method: 'POST',
@@ -592,6 +712,30 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.equal(bearerVideoCategories.body.length >= 1, true)
   const bearerVideoDeletion = await fetch(`${baseUrl}/api/videos/${bearerVideoUpload.body[0].id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${apiKey.body.secret}` } })
   assert.equal(bearerVideoDeletion.status, 204)
+  const bearerFileGroups = await requestJson(`${baseUrl}/api/file-groups`, { headers: { Authorization: `Bearer ${apiKey.body.secret}` } })
+  assert.equal(bearerFileGroups.response.status, 200)
+  assert.equal(bearerFileGroups.body.length >= 1, true)
+  const bearerCreatedFileGroup = await requestJson(`${baseUrl}/api/file-groups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey.body.secret}` },
+    body: JSON.stringify({ name: '开发者文件' }),
+  })
+  assert.equal(bearerCreatedFileGroup.response.status, 201)
+  const bearerDefaultFileGroup = await requestJson(`${baseUrl}/api/file-groups/${bearerCreatedFileGroup.body.id}/default`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${apiKey.body.secret}` },
+  })
+  assert.equal(bearerDefaultFileGroup.response.status, 200)
+  const bearerFileForm = new FormData()
+  bearerFileForm.append('files', new Blob([fileBytes], { type: 'text/plain' }), '开发者文件.txt')
+  const bearerFileUpload = await requestJson(`${baseUrl}/api/files`, { method: 'POST', headers: { Authorization: `Bearer ${apiKey.body.secret}` }, body: bearerFileForm })
+  assert.equal(bearerFileUpload.response.status, 201)
+  assert.equal(bearerFileUpload.body[0].groupName, '开发者文件')
+  const bearerFiles = await requestJson(`${baseUrl}/api/files`, { headers: { Authorization: `Bearer ${apiKey.body.secret}` } })
+  assert.equal(bearerFiles.response.status, 200)
+  assert.equal(bearerFiles.body.some((file) => file.id === bearerFileUpload.body[0].id), true)
+  const bearerFileDeletion = await fetch(`${baseUrl}/api/files/${bearerFileUpload.body[0].id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${apiKey.body.secret}` } })
+  assert.equal(bearerFileDeletion.status, 204)
   const bearerKeyManagement = await requestJson(`${baseUrl}/api/api-keys`, { headers: { Authorization: `Bearer ${apiKey.body.secret}` } })
   assert.equal(bearerKeyManagement.response.status, 403)
   const bearerStorage = await requestJson(`${baseUrl}/api/storage/providers`, { headers: { Authorization: `Bearer ${apiKey.body.secret}` } })
@@ -665,5 +809,10 @@ test('旧版 SQLite 结构会在启动时自动迁移', async (context) => {
   assert.equal(columnNames('videos').includes('hotlink_protection_enabled'), true)
   assert.equal(migrated.prepare('SELECT hotlink_protection_enabled FROM videos WHERE id = ?').get('legacy-video').hotlink_protection_enabled, 1)
   assert.equal(migrated.prepare('SELECT album FROM videos WHERE id = ?').get('legacy-video').album, '视频')
+  assert.equal(columnNames('files').includes('group_name'), true)
+  assert.equal(columnNames('file_groups').includes('is_default'), true)
+  assert.equal(migrated.prepare('SELECT COUNT(*) AS count FROM file_groups').get().count, 1)
+  assert.equal(migrated.prepare('SELECT name FROM file_groups WHERE owner_id = ? AND is_default = 1').get('legacy-user').name, '文件')
+  assert.match(migrated.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_traffic_daily'").get().sql, /'file'/)
   migrated.close()
 })

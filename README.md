@@ -1,8 +1,8 @@
 # PicNest 图屿
 
-PicNest 是一个自托管、多用户的图片和视频托管与资产管理系统。它支持粘贴、拖曳和批量选择上传，也支持由服务器端从 HTTP/HTTPS 地址远程导入媒体；提供图库、视频库、相册、分享链接、用户权限、独立配额、API 密钥，以及可由管理员控制的游客上传。
+PicNest 是一个自托管、多用户的图片、视频和文件托管与资产管理系统。它支持粘贴、拖曳和批量选择上传，也支持由服务器端从 HTTP/HTTPS 地址远程导入资源；提供图库、视频库、文件库、相册/分组、分享链接、用户权限、独立配额、API 密钥，以及可由管理员控制的游客上传。
 
-图片和视频可以保存在本机磁盘、腾讯云 COS、阿里云 OSS、华为云 OBS、WebDAV 或其他 S3 兼容对象存储中；账户、媒体索引和加密后的存储配置保存在 SQLite。系统适合个人、工作室和小团队在自己的服务器上部署。
+图片、视频和文件可以保存在本机磁盘、腾讯云 COS、阿里云 OSS、华为云 OBS、WebDAV 或其他 S3 兼容对象存储中；账户、资源索引和加密后的存储配置保存在 SQLite。系统适合个人、工作室和小团队在自己的服务器上部署。
 
 ## 目录
 
@@ -31,15 +31,16 @@ PicNest 是一个自托管、多用户的图片和视频托管与资产管理系
 
 - 粘贴、拖曳、单选和批量选择上传
 - 视频库支持 MP4、WebM、MOV、M4V、AVI、MKV 上传、在线播放、Range 断点播放和分享
-- 媒体库支持图片和视频重命名，重命名后会同步更新公开文件名与引用地址
-- 工作台可选择目标相册，未选择时自动进入用户设置的默认相册
+- 文件库支持 PDF、Office 文档、文本、代码、压缩包、音频和设计源文件上传、分组、重命名、下载和分享
+- 媒体库支持图片和视频重命名，文件库支持文件重命名，重命名后会同步更新公开文件名与引用地址
+- 工作台可分别选择目标相册、视频分类和文件分组，未选择时自动进入各自默认项
 - 登录用户单张最大 20 MB，单次最多 20 张
-- 登录用户单个视频默认最大 500 MB，单次最多 10 个；视频与图片共用用户存储配额
+- 登录用户单个视频默认最大 500 MB，单次最多 10 个；单个文件默认最大 1024 MB，单次最多 20 个；三类资源共用用户存储配额
 - 管理员、普通成员两种角色
 - 用户级图片、相册、配额、存储策略和 API 密钥隔离，支持为不同客户端创建多把独立密钥
 - 管理员可编辑成员资料、角色、密码、存储配额和目标存储服务
 - API 密钥调用按月统计次数、成功率、响应耗时和流量
-- 统计分析按天记录媒体直链实际流量、外部引用域名、Range 请求和高消耗媒体
+- 统计分析按天记录图片、视频和文件直链实际流量、外部引用域名、Range 请求和高消耗资源
 - 图片和视频默认开启防盗链，支持系统级按类型开关、可信引用域名和单个媒体独立关闭
 - 首位用户自动成为管理员，后续账户由管理员创建
 - 网格/列表图库、关键词、相册和格式筛选
@@ -75,11 +76,11 @@ PicNest 是一个自托管、多用户的图片和视频托管与资产管理系
 必须持久化和备份的内容：
 
 - `server/data/picnest.db`
-- `server/uploads/`，仅本地存储的图片和视频文件
+- `server/uploads/`，仅本地存储的图片、视频和文件内容
 - `server/data/.session-secret`，或外部配置的 `PICNEST_SESSION_SECRET`
 - 外部配置的 `PICNEST_STORAGE_SECRET`
 
-远程对象本身还需要使用云厂商或 WebDAV 服务的版本控制、跨区域复制或备份能力单独保护。SQLite 只保存媒体索引，不包含远程图片或视频内容。
+远程对象本身还需要使用云厂商或 WebDAV 服务的版本控制、跨区域复制或备份能力单独保护。SQLite 只保存资源索引，不包含远程图片、视频或文件内容。
 
 ## 运行要求
 
@@ -296,6 +297,7 @@ PM2 模板默认使用 `/usr/bin/node`。如果 `command -v node` 返回其他�
 | `PICNEST_SESSION_SECRET` | 开发环境自动生成 | JWT 会话签名密钥；`NODE_ENV=production` 时必须显式配置至少 32 个字符并备份 |
 | `PICNEST_STORAGE_SECRET` | 开发环境使用会话密钥 | 云存储、WebDAV 凭据和可查看 API 密钥的加密密钥；生产环境必须独立配置至少 32 个字符，投入使用后不可更换 |
 | `PICNEST_VIDEO_MAX_MB` | `500` | 登录用户单个视频的大小上限，单位 MB；单次最多上传 10 个 |
+| `PICNEST_FILE_MAX_MB` | `1024` | 登录用户单个通用文件的大小上限，单位 MB；单次最多上传 20 个 |
 | `PICNEST_REMOTE_DOWNLOADER` | `auto` | 远程导入下载器：优先 `aria2c`，其次 `curl`，最后使用 Node 流式下载；也可显式指定 `aria2c`、`curl` 或 `node` |
 | `PICNEST_REMOTE_MAX_ACTIVE` | `2` | 单个用户同时运行的远程导入任务数，最大支持配置为 8 |
 | `PICNEST_ANALYTICS_TIMEZONE` | `Asia/Shanghai` | 每日流量统计使用的 IANA 时区，例如 `Asia/Shanghai`、`Asia/Singapore` 或 `UTC` |
@@ -333,9 +335,9 @@ sudo apt-get update
 sudo apt-get install -y aria2 curl
 ```
 
-远程导入只允许 HTTP/HTTPS，默认拒绝本机、局域网和其他私有地址，限制单任务最大大小为当前视频大小上限与 20 MB 图片上限中的较大值。下载完成后，服务端会根据实际图片格式或远程文件扩展名/MIME 类型自动进入图片相册或视频分类。任务页面关闭后，服务器端任务仍会继续运行；重新打开页面时，媒体列表可通过刷新看到已入库结果。
+远程导入只允许 HTTP/HTTPS，默认拒绝本机、局域网和其他私有地址，限制单任务最大大小为当前视频大小上限、文件大小上限与 20 MB 图片上限中的较大值。下载完成后，服务端会根据实际图片格式或远程文件扩展名/MIME 类型自动进入图片相册、视频分类或文件分组。任务页面关闭后，服务器端任务仍会继续运行；重新打开页面时，资源列表可通过刷新看到已入库结果。
 
-远程导入也支持 Bearer API 密钥，适合服务器脚本、自动化流程或第三方服务直接提交远程视频。接口是异步的：创建成功返回 `202` 和任务 `id`，服务器随后执行下载、格式识别、分类和入库；客户端使用同一把 API 密钥轮询任务状态。请求体使用 JSON，`url` 和 `source` 二选一，`category` 仅在最终识别为视频时生效，`album` 仅在最终识别为图片时生效，`connections` 可选且范围为 1–16。
+远程导入也支持 Bearer API 密钥，适合服务器脚本、自动化流程或第三方服务直接提交远程视频、文档或素材包。接口是异步的：创建成功返回 `202` 和任务 `id`，服务器随后执行下载、格式识别、分类和入库；客户端使用同一把 API 密钥轮询任务状态。请求体使用 JSON，`url` 和 `source` 二选一，`category` 仅在最终识别为视频时生效，`album` 仅在最终识别为图片时生效，`fileGroup` 或 `group` 仅在最终识别为通用文件时生效，`connections` 可选且范围为 1–16。
 
 ```bash
 curl -X POST "https://img.example.com/api/remote-imports" \
@@ -355,7 +357,7 @@ curl "https://img.example.com/api/remote-imports/TASK_ID" \
   -H "Authorization: Bearer pn_live_xxx"
 ```
 
-任务完成时，`result` 会包含最终图片或视频对象；失败时读取 `error`。任务状态保存在当前服务进程内，服务重启或任务超过 1 小时后将无法继续查询。
+任务完成时，`result` 会包含最终图片、视频或文件对象；失败时读取 `error`。任务状态保存在当前服务进程内，服务重启或任务超过 1 小时后将无法继续查询。
 
 ## 媒体防盗链
 
@@ -403,7 +405,7 @@ curl -X PATCH "https://img.example.com/api/videos/VIDEO_ID" \
 
 ## 统计分析
 
-登录后的“统计分析”会按当前用户展示最近 7、30、90、180 或 365 天的媒体直链流量。服务端会在图片或视频实际响应数据时记录返回字节、请求次数、Range 请求，以及请求来源类型：带其他域名 Referer 的请求计为外部引用，没有 Referer 的请求计为直接访问，当前站点 Referer 计为站内访问。外部引用只保存来源域名，不保存完整页面地址或客户端 IP。
+登录后的“统计分析”会按当前用户展示最近 7、30、90、180 或 365 天的资源直链流量。服务端会在图片、视频或文件实际响应数据时记录返回字节、请求次数、Range 请求，以及请求来源类型：带其他域名 Referer 的请求计为外部引用，没有 Referer 的请求计为直接访问，当前站点 Referer 计为站内访问。外部引用只保存来源域名，不保存完整页面地址或客户端 IP。
 
 统计数据从功能部署后开始累计；浏览器或 CDN 命中缓存而没有到达 PicNest 的请求不会被服务器统计。页面中的峰值提示是基于统计期间外部流量日均值的辅助判断，不能替代 CDN、Nginx 或云厂商账单数据。
 
@@ -422,16 +424,16 @@ npm start
 ### 切换规则
 
 - 系统始终保留不可删除的“本地文件系统”配置。
-- 管理员可以编辑“本地文件系统”，分别填写图片存储目录和视频存储目录；留空时两者都使用 `server/uploads/`。
+- 管理员可以编辑“本地文件系统”，分别填写图片、视频和文件存储目录；留空时三者都使用 `server/uploads/`。
 - 本地目录支持相对于 `server/uploads/` 的目录（例如 `images`）或服务器上的绝对路径（例如 `/srv/picnest/images`、`D:\PicNest\images`）。
-- 云存储和 WebDAV 支持分别填写图片对象路径前缀和视频对象路径前缀，例如 `picnest/images` 与 `picnest/videos`；留空时直接写入当前服务的根目录。
+- 云存储和 WebDAV 支持分别填写图片、视频和文件对象路径前缀，例如 `picnest/images`、`picnest/videos` 与 `picnest/files`；留空时直接写入当前服务的根目录。
 - “设为当前”会写入、读取并删除一个很小的检测对象，确认上传、浏览和删除权限都正常后才完成切换。
 - 未指定用户存储策略时，登录用户、API 密钥上传和开启后的游客上传都会使用系统当前存储。
 - 管理员可以在“成员管理”中把某位用户固定到指定存储服务；用户策略优先于系统当前存储。
-- 切换只影响新上传，历史图片和视频仍保存在原存储；每个媒体文件会记录自己的存储服务和对象键。
-- 修改图片或视频目录只影响后续上传，不会自动移动历史文件；历史文件仍按上传时记录的位置读取和删除。
-- 删除历史图片或视频时，系统会使用该文件对应的原存储配置删除对象。
-- 仍被图片或视频引用、分配给用户、正在使用或属于本地文件系统的存储配置不能删除。
+- 切换只影响新上传，历史图片、视频和文件仍保存在原存储；每个资源会记录自己的存储服务和对象键。
+- 修改图片、视频或文件目录只影响后续上传，不会自动移动历史文件；历史文件仍按上传时记录的位置读取和删除。
+- 删除历史图片、视频或文件时，系统会使用该文件对应的原存储配置删除对象。
+- 仍被图片、视频或文件引用、分配给用户、正在使用或属于本地文件系统的存储配置不能删除。
 
 ### 用户配额与存储策略
 
@@ -476,20 +478,20 @@ npm start
 
 ### 通用 S3
 
-填写服务商提供的 Region、Endpoint、Bucket 和 S3 访问密钥。Endpoint 可以使用云厂商提供的内网地址；MinIO 等需要路径式 Bucket 地址的服务应勾选“使用 Path-style Bucket 地址”。图片对象路径前缀和视频对象路径前缀可以分别把两类文件限制在 Bucket 的不同目录中，例如 `picnest/images` 与 `picnest/videos`。
+填写服务商提供的 Region、Endpoint、Bucket 和 S3 访问密钥。Endpoint 可以使用云厂商提供的内网地址；MinIO 等需要路径式 Bucket 地址的服务应勾选“使用 Path-style Bucket 地址”。图片、视频和文件对象路径前缀可以分别把三类资源限制在 Bucket 的不同目录中，例如 `picnest/images`、`picnest/videos` 与 `picnest/files`。
 
 ### 内网 Endpoint 与流量
 
 - 腾讯云 COS 和阿里云 OSS 可以勾选“使用同地域内网 Endpoint”；手动填写 Endpoint 时，手动地址优先。
 - 华为云 OBS 和通用 S3 可以在“服务端 Endpoint”中填写控制台提供的内网地址。不同区域的内网域名可能不同，系统不会猜测华为云或第三方服务商的专用地址。
-- 内网 Endpoint 用于 PicNest 服务端执行上传、读取、连接检测和删除。图片直链统一指向 PicNest 的 `/media/:id`，访客不会直接连接对象存储。
+- 内网 Endpoint 用于 PicNest 服务端执行上传、读取、连接检测和删除。图片、视频和文件直链统一由 PicNest 代理返回，访客不会直接连接对象存储。
 - 只有 PicNest 服务器与 Bucket 位于同一云厂商的同地域网络，并且内网 DNS、路由和安全策略可达时，服务端传输才不会走公网。跨云、跨地域或本地电脑部署通常无法使用该内网地址。
 - 请求链路为“访客 → PicNest/Nginx/CDN → PicNest 服务端 → 对象存储内网 Endpoint”。对象存储不产生面向访客的公网下行，但 PicNest 服务器、负载均衡或前置 CDN 会承担对访客的公网下行流量。
-- 图片响应带有一年不可变缓存头，适合由浏览器、Nginx 或前置 CDN 缓存。未配置缓存层时，每次未命中浏览器缓存的访问都会由 PicNest 服务端读取并转发原图。
+- 未启用防盗链的资源响应带有一年不可变缓存头，适合由浏览器、Nginx 或前置 CDN 缓存。未配置缓存层时，每次未命中浏览器缓存的访问都会由 PicNest 服务端读取并转发原文件。
 
 ### 私有存储和最小权限
 
-Bucket 和 WebDAV 可以保持私有，访客只访问 PicNest 生成的图片地址。存储密钥至少需要指定 Bucket 或路径前缀下的读取、写入和删除权限；连接检测不会修改 Bucket 权限，也不会把 Bucket 自动设为公开。
+Bucket 和 WebDAV 可以保持私有，访客只访问 PicNest 生成的资源地址。存储密钥至少需要指定 Bucket 或路径前缀下的读取、写入和删除权限；连接检测不会修改 Bucket 权限，也不会把 Bucket 自动设为公开。
 
 保存的 AccessKey、SecretKey 和 WebDAV 密码使用 AES-256-GCM 加密后写入 SQLite，API 和页面不会返回明文密钥。编辑配置时将密钥字段留空即可保留原密钥。
 
@@ -560,7 +562,7 @@ server {
 }
 ```
 
-`client_max_body_size 5120m` 用于覆盖登录用户最多 20 张、每张 20 MB 的图片批量请求，以及最多 10 个、每个默认 500 MB 的视频批量请求和 multipart 额外开销。若通过 `PICNEST_VIDEO_MAX_MB` 提高视频上限，也必须同步提高 Nginx 的请求体上限；如果不需要批量上传大视频，可以按实际策略降低这两个值。
+`client_max_body_size 5120m` 用于覆盖登录用户最多 20 张、每张 20 MB 的图片批量请求，最多 10 个、每个默认 500 MB 的视频批量请求，以及最多 20 个、每个默认 1024 MB 的文件批量请求和 multipart 额外开销。若通过 `PICNEST_VIDEO_MAX_MB` 或 `PICNEST_FILE_MAX_MB` 提高上限，也必须同步提高 Nginx 的请求体上限；如果不需要批量上传大文件，可以按实际策略降低这个值。
 
 ### 4. 配置 HTTPS
 
@@ -701,7 +703,7 @@ Caddy 默认会传递 `X-Forwarded-For` 和 `X-Forwarded-Proto`。PicNest 只信
 1. 打开 `https://你的实际域名`，确认页面显示“创建你的空间”。
 2. 创建首个账户；该账户自动成为管理员，公开注册接口随后自动关闭。
 3. 登录后打开“系统设置”，确认存储服务、上传类型白名单和游客上传状态；游客上传默认关闭。
-4. 上传一张测试图片和一个测试视频，确认缩略图、在线播放、进度拖动，以及直链、Markdown、HTML 和 BBCode 地址均使用实际公网域名。
+4. 上传一张测试图片、一个测试视频和一个测试文件，确认缩略图、在线播放、进度拖动、文件下载，以及直链、Markdown、HTML 和 BBCode 地址均使用实际公网域名。
 5. 打开“成员管理”创建普通成员，并按需要设置配额和存储策略。
 6. 打开“开发者”创建测试 API 密钥，按页面文档执行一次上传，再删除不再使用的测试密钥。
 
@@ -1137,7 +1139,21 @@ curl -X POST https://img.example.com/api/videos \
 
 视频上传始终返回视频对象数组，即使只上传一个文件；单次最多 10 个，单个大小上限由 `PICNEST_VIDEO_MAX_MB` 控制，默认 500 MB。`GET /api/videos` 返回列表，`GET /api/videos/:id` 返回单个对象，`PATCH /api/videos/:id` 支持修改 `name`、`category`、`starred` 和 `hotlinkProtectionEnabled`，`POST /api/videos/bulk-delete` 支持按 ID 数组批量删除。分类通过 `GET/POST /api/video-categories` 管理，并可用 `PATCH /api/video-categories/:id/default` 设置默认分类。
 
-媒体库将图片相册与视频分类分开管理。视频通过独立接口保存，视频与图片共用用户配额和存储服务。支持 `mp4`、`webm`、`mov`、`m4v`、`avi`、`mkv`，服务端按原始字节保存，不经过 Sharp 图片处理。图片和视频都可以在详情弹窗中重命名，系统会保持真实格式扩展名并同步更新公开文件名和引用地址。视频可以在媒体库的“视频”页按分类筛选、上传、播放、分享、收藏和删除；分类支持创建、设置默认分类，以及在视频详情中重新归类。视频直链公开可读取，响应支持 `Accept-Ranges: bytes`；浏览器可以使用 `Range` 请求进行按需加载、进度拖动和断点播放。视频对象同样返回 `filename`、`url`、`path`、`type`、`format`、`extension`、`mimeType`、`size`、`category`、`hotlinkProtectionEnabled`、`links` 和 `createdAt`，并提供 HTML5 `<video>` 引用。旧客户端使用的 `album` 字段继续作为兼容别名。
+媒体库将图片相册与视频分类分开管理。视频通过独立接口保存，视频与图片共用用户配额和存储服务。支持 `mp4`、`webm`、`mov`、`m4v`、`avi`、`mkv`，服务端按原始字节保存，不经过 Sharp 图片处理。图片和视频都可以在详情弹窗中重命名，系统会保持真实格式扩展名并同步更新公开文件名和引用地址。视频可以在媒体库的“视频”页按分类筛选、播放、分享、收藏和删除；上传入口统一位于工作台。分类支持创建、设置默认分类，以及在视频详情中重新归类。视频直链公开可读取，响应支持 `Accept-Ranges: bytes`；浏览器可以使用 `Range` 请求进行按需加载、进度拖动和断点播放。视频对象同样返回 `filename`、`url`、`path`、`type`、`format`、`extension`、`mimeType`、`size`、`category`、`hotlinkProtectionEnabled`、`links` 和 `createdAt`，并提供 HTML5 `<video>` 引用。旧客户端使用的 `album` 字段继续作为兼容别名。
+
+文件上传使用独立的 `/api/files` 接口，Bearer API 密钥的认证方式与图片一致：
+
+```bash
+curl -X POST https://img.example.com/api/files \
+  -H "Authorization: Bearer pn_live_xxx" \
+  -F "files=@contract.pdf" \
+  -F "files=@assets.zip" \
+  -F "group=交付文件"
+```
+
+文件上传始终返回文件对象数组，即使只上传一个文件；单次最多 20 个，单个大小上限由 `PICNEST_FILE_MAX_MB` 控制，默认 1024 MB。默认支持 PDF、Office 文档、文本、代码、压缩包、音频和设计源文件等常见格式，服务端按原始字节保存。`GET /api/files` 返回列表，`GET /api/files/:id` 返回单个对象，`PATCH /api/files/:id` 支持修改 `name`、`group` 和 `starred`，`POST /api/files/bulk-delete` 支持按 ID 数组批量删除。文件分组通过 `GET/POST /api/file-groups` 管理，并可用 `PATCH /api/file-groups/:id/default` 设置默认分组。
+
+文件库独立于图片库和媒体库展示，用于文档、压缩包、音频、代码和交付物管理。文件可以在详情弹窗中重命名，系统会保留真实格式扩展名并同步更新公开下载文件名和引用地址。文件直链公开可读取，并以 `Content-Disposition: attachment` 下载方式响应。文件对象返回 `filename`、`url`、`path`、`type`、`format`、`extension`、`mimeType`、`size`、`group`、`starred`、`links` 和 `createdAt`。
 
 系统图片处理默认开启、默认保持原格式。管理员可在“系统设置 → 图片处理”中设置输出为 JPEG、PNG、WebP 或 AVIF，调整 1–100 的转换质量，并配置 EXIF 自动旋转和元数据清理。
 
@@ -1171,10 +1187,16 @@ API 上传可使用 multipart 字段 `format`、`quality`、`autoOrient`、`stri
 | `GET` | `/api/videos/:id` | 视频所有者 | 读取单个视频的完整对象与引用地址 |
 | `PATCH/DELETE` | `/api/videos/:id` | 视频所有者 | 修改名称、分类、收藏状态或防盗链、删除视频 |
 | `POST` | `/api/videos/bulk-delete` | 视频所有者 | 批量删除视频 |
+| `GET/POST` | `/api/files` | 用户/API 密钥 | 文件列表或上传，单次最多 20 个 |
+| `GET` | `/api/files/:id` | 文件所有者 | 读取单个文件的完整对象与引用地址 |
+| `PATCH/DELETE` | `/api/files/:id` | 文件所有者 | 修改名称、分组、收藏状态或删除文件 |
+| `POST` | `/api/files/bulk-delete` | 文件所有者 | 批量删除文件 |
 | `POST` | `/api/remote-imports` | 用户/API 密钥 | 创建服务器端远程导入任务，异步返回 `202` |
 | `GET` | `/api/remote-imports/:id` | 创建者/API 密钥 | 查询远程导入任务进度和结果 |
 | `GET/POST` | `/api/video-categories` | 用户/API 密钥 | 视频分类列表或创建 |
 | `PATCH` | `/api/video-categories/:id/default` | 分类所有者 | 设置默认上传视频分类 |
+| `GET/POST` | `/api/file-groups` | 用户/API 密钥 | 文件分组列表或创建 |
+| `PATCH` | `/api/file-groups/:id/default` | 分组所有者 | 设置默认上传文件分组 |
 | `GET/POST` | `/api/albums` | 用户/API 密钥 | 相册列表或创建 |
 | `PATCH` | `/api/albums/:id/default` | 相册所有者 | 设置默认相册 |
 | `GET/POST` | `/api/api-keys` | 用户会话 | 查看密钥列表或创建新密钥 |
@@ -1193,7 +1215,7 @@ API 上传可使用 multipart 字段 `format`、`quality`、`autoOrient`、`stri
 | `GET` | `/api/stats` | 用户/API 密钥 | 当前用户空间统计 |
 | `GET` | `/api/analytics/traffic?days=30` | 当前用户会话 | 查询每日媒体引用/分享流量、来源域名和高消耗媒体 |
 
-公开图片由 `GET /media/:id/:filename.ext` 返回，视频由 `GET /media/video/:id/:filename.ext` 返回；两者都包含实际 `Content-Type`、UTF-8 文件名、缓存头和 ETag，并按防盗链策略返回 `403` 或媒体内容。视频媒体地址额外支持 `Range` 请求并返回 `206 Partial Content`，旧的无文件名地址继续兼容。完整交互式文档可在登录后的“开发者 → 阅读 API 文档”中查看。
+公开图片由 `GET /media/:id/:filename.ext` 返回，视频由 `GET /media/video/:id/:filename.ext` 返回，文件由 `GET /media/file/:id/:filename.ext` 返回；三者都包含实际 `Content-Type`、UTF-8 文件名、缓存头和 ETag。图片和视频会按防盗链策略返回 `403` 或媒体内容，文件以下载方式公开响应。视频媒体地址额外支持 `Range` 请求并返回 `206 Partial Content`，旧的无文件名地址继续兼容。完整交互式文档可在登录后的“开发者 → 阅读 API 文档”中查看。
 
 ## 常见问题
 
@@ -1211,7 +1233,7 @@ systemd 查看 `sudo systemctl status picnest --no-pager` 和 `sudo journalctl -
 
 ### 上传返回 413 Request Entity Too Large
 
-Nginx 检查 `client_max_body_size`，Caddy 检查 `request_body max_size`。修改后验证并重新加载代理配置。
+Nginx 检查 `client_max_body_size`，Caddy 检查 `request_body max_size`。文件库默认允许单文件 1024 MB，如果上传大文件或批量文件，需要让反向代理上限大于实际请求体。修改后验证并重新加载代理配置。
 
 ### HTTPS 下反复返回登录页
 

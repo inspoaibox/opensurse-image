@@ -1,4 +1,4 @@
-export type ViewName = 'dashboard' | 'gallery' | 'media' | 'analytics' | 'users' | 'developer' | 'settings'
+export type ViewName = 'dashboard' | 'gallery' | 'media' | 'files' | 'analytics' | 'users' | 'developer' | 'settings'
 
 export interface User {
   id: string
@@ -13,6 +13,7 @@ export interface User {
 export interface UserSummary extends User {
   imageCount: number
   videoCount: number
+  fileCount: number
   storageUsed: number
 }
 
@@ -36,6 +37,15 @@ export interface VideoCategoryItem {
   cover: string | null
 }
 
+export interface FileGroupItem {
+  id: string
+  name: string
+  isDefault: boolean
+  createdAt: string
+  fileCount: number
+  storageUsed: number
+}
+
 export interface ApiKeyItem {
   id: string
   label: string
@@ -54,6 +64,7 @@ export interface StorageProviderConfig {
   bucket?: string
   imagePathPrefix?: string
   videoPathPrefix?: string
+  filePathPrefix?: string
   pathPrefix?: string
   forcePathStyle?: boolean
   useInternalEndpoint?: boolean
@@ -74,6 +85,7 @@ export interface StorageProviderItem {
   }
   imageCount: number
   videoCount: number
+  fileCount: number
   createdAt: string
   updatedAt: string
 }
@@ -139,6 +151,30 @@ export interface VideoItem {
   createdAt: string
 }
 
+export interface FileItem {
+  id: string
+  name: string
+  filename?: string
+  url: string
+  path?: string
+  type: string
+  format?: string
+  extension?: string
+  mimeType: string
+  size: number
+  group: string
+  groupName?: string
+  starred: boolean
+  views: number
+  links?: {
+    direct: string
+    markdown: string
+    bbcode: string
+    html: string
+  }
+  createdAt: string
+}
+
 export type RemoteImportStatus = 'queued' | 'downloading' | 'processing' | 'completed' | 'failed'
 export type RemoteImportPhase = 'queued' | 'downloading' | 'detecting' | 'storing' | 'completed' | 'failed'
 
@@ -148,7 +184,7 @@ export interface RemoteImportTask {
   phase: RemoteImportPhase
   sourceLabel: string
   filename: string
-  mediaType: 'image' | 'video' | ''
+  mediaType: 'image' | 'video' | 'file' | ''
   progress: number
   downloadedBytes: number
   totalBytes: number | null
@@ -156,7 +192,7 @@ export interface RemoteImportTask {
   eta: number | null
   downloader: 'aria2c' | 'curl' | 'node' | null
   connections: number
-  result: ImageItem | VideoItem | null
+  result: ImageItem | VideoItem | FileItem | null
   error: string
   createdAt: string
   updatedAt: string
@@ -186,6 +222,7 @@ export interface ImageMetadata {
 export interface Stats {
   images: number
   videos: number
+  files: number
   used: number
   limit: number
   traffic: number
@@ -209,7 +246,7 @@ export interface TrafficAnalyticsDaily {
 }
 
 export interface TrafficAnalyticsMedia {
-  mediaType: 'image' | 'video'
+  mediaType: 'image' | 'video' | 'file'
   mediaId: string
   name: string
   filename: string

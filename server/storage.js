@@ -21,7 +21,8 @@ const trimTrailingSlash = (value) => String(value || '').trim().replace(/\/+$/g,
 const encodeObjectKey = (value) => String(value).split('/').map(encodeURIComponent).join('/')
 const validRangeHeader = (value) => /^bytes=\d*-\d*$/.test(String(value || '').trim())
 const localAbsoluteKeyPrefix = 'local-absolute-v1:'
-const mediaPathFields = { image: 'imagePathPrefix', video: 'videoPathPrefix' }
+const mediaPathFields = { image: 'imagePathPrefix', video: 'videoPathPrefix', file: 'filePathPrefix' }
+const managedMediaTypes = Object.freeze(['image', 'video', 'file'])
 const moveFileSync = (source, destination) => {
   try {
     fs.renameSync(source, destination)
@@ -179,13 +180,16 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
     const legacyPrefix = String(config.pathPrefix || '')
     config.imagePathPrefix = config.imagePathPrefix ?? legacyPrefix
     config.videoPathPrefix = config.videoPathPrefix ?? legacyPrefix
+    config.filePathPrefix = config.filePathPrefix ?? legacyPrefix
     delete config.pathPrefix
     if (type === 'local') {
       config.imagePathPrefix = normalizeLocalDirectory(config.imagePathPrefix)
       config.videoPathPrefix = normalizeLocalDirectory(config.videoPathPrefix)
+      config.filePathPrefix = normalizeLocalDirectory(config.filePathPrefix)
     } else {
       config.imagePathPrefix = normalizePathPrefix(config.imagePathPrefix)
       config.videoPathPrefix = normalizePathPrefix(config.videoPathPrefix)
+      config.filePathPrefix = normalizePathPrefix(config.filePathPrefix)
     }
     return config
   }
@@ -193,10 +197,10 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
   const normalizeConfig = (type, incoming, current = {}) => {
     const source = incoming && typeof incoming === 'object' ? incoming : {}
     const allowed = type === 'webdav'
-      ? ['baseUrl', 'username', 'password', 'imagePathPrefix', 'videoPathPrefix']
+      ? ['baseUrl', 'username', 'password', 'imagePathPrefix', 'videoPathPrefix', 'filePathPrefix']
       : type === 'local'
-        ? ['imagePathPrefix', 'videoPathPrefix']
-        : ['region', 'endpoint', 'bucket', 'accessKeyId', 'secretAccessKey', 'imagePathPrefix', 'videoPathPrefix', 'forcePathStyle', 'useInternalEndpoint']
+        ? ['imagePathPrefix', 'videoPathPrefix', 'filePathPrefix']
+        : ['region', 'endpoint', 'bucket', 'accessKeyId', 'secretAccessKey', 'imagePathPrefix', 'videoPathPrefix', 'filePathPrefix', 'forcePathStyle', 'useInternalEndpoint']
     const config = {}
 
     for (const key of allowed) {
@@ -205,7 +209,7 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
         config[key] = Object.hasOwn(source, key) ? source[key] : Boolean(current[key])
         continue
       }
-      const isPathField = key === 'imagePathPrefix' || key === 'videoPathPrefix'
+      const isPathField = key === 'imagePathPrefix' || key === 'videoPathPrefix' || key === 'filePathPrefix'
       const hasExplicitValue = Object.hasOwn(source, key) || (isPathField && Object.hasOwn(source, 'pathPrefix'))
       const legacyPrefix = Object.hasOwn(source, 'pathPrefix')
         ? source.pathPrefix
@@ -222,9 +226,11 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
     if (type === 'local') {
       config.imagePathPrefix = normalizeLocalDirectory(config.imagePathPrefix)
       config.videoPathPrefix = normalizeLocalDirectory(config.videoPathPrefix)
+      config.filePathPrefix = normalizeLocalDirectory(config.filePathPrefix)
     } else {
       config.imagePathPrefix = normalizePathPrefix(config.imagePathPrefix)
       config.videoPathPrefix = normalizePathPrefix(config.videoPathPrefix)
+      config.filePathPrefix = normalizePathPrefix(config.filePathPrefix)
     }
     if (type === 'webdav') {
       if (!config.baseUrl) throw new StorageManagerError('请填写 WebDAV 服务地址')
@@ -260,6 +266,7 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
       credentials,
       imageCount: Number(row.image_count || 0),
       videoCount: Number(row.video_count || 0),
+      fileCount: Number(row.file_count || 0),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -277,7 +284,7 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
     db.prepare(`
       INSERT OR IGNORE INTO storage_providers (id, name, type, config_encrypted, is_default, created_at, updated_at)
       VALUES ('local', '本地文件系统', 'local', ?, 0, ?, ?)
-    `).run(encryptConfig({ imagePathPrefix: '', videoPathPrefix: '' }), now, now)
+    `).run(encryptConfig({ imagePathPrefix: '', videoPathPrefix: '', filePathPrefix: '' }), now, now)
     const current = db.prepare('SELECT id FROM storage_providers WHERE is_default = 1 LIMIT 1').get()
     if (!current) db.prepare("UPDATE storage_providers SET is_default = CASE WHEN id = 'local' THEN 1 ELSE 0 END").run()
   }
@@ -287,7 +294,8 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
   const listProviders = () => db.prepare(`
     SELECT storage_providers.*,
       (SELECT COUNT(*) FROM images WHERE images.storage_provider_id = storage_providers.id) AS image_count,
-      (SELECT COUNT(*) FROM videos WHERE videos.storage_provider_id = storage_providers.id) AS video_count
+      (SELECT COUNT(*) FROM videos WHERE videos.storage_provider_id = storage_providers.id) AS video_count,
+      (SELECT COUNT(*) FROM files WHERE files.storage_provider_id = storage_providers.id) AS file_count
     FROM storage_providers
     ORDER BY storage_providers.is_default DESC, storage_providers.created_at ASC
   `).all().map(mapProvider)
@@ -338,6 +346,8 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
     if (imageCount > 0) throw new StorageManagerError(`该存储仍有 ${imageCount} 张图片，不能删除`, 409)
     const videoCount = Number(db.prepare('SELECT COUNT(*) AS count FROM videos WHERE storage_provider_id = ?').get(id).count)
     if (videoCount > 0) throw new StorageManagerError(`该存储仍有 ${videoCount} 个视频，不能删除`, 409)
+    const fileCount = Number(db.prepare('SELECT COUNT(*) AS count FROM files WHERE storage_provider_id = ?').get(id).count)
+    if (fileCount > 0) throw new StorageManagerError(`该存储仍有 ${fileCount} 个文件，不能删除`, 409)
     db.prepare('DELETE FROM storage_providers WHERE id = ?').run(id)
   }
 
@@ -356,7 +366,7 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
   const testProvider = async (id) => {
     const provider = providerWithConfig(id)
     if (provider.type === 'local') {
-      for (const mediaType of ['image', 'video']) {
+      for (const mediaType of managedMediaTypes) {
         const configuredDirectory = pathPrefixFor(provider.config, mediaType)
         const root = path.isAbsolute(configuredDirectory)
           ? path.resolve(configuredDirectory)
@@ -371,7 +381,7 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
     if (S3_TYPES.has(provider.type)) {
       const client = createS3Client(provider)
       try {
-        for (const mediaType of ['image', 'video']) {
+        for (const mediaType of managedMediaTypes) {
           const prefix = pathPrefixFor(provider.config, mediaType)
           const testKey = prefix
             ? `${prefix}/.picnest-write-test-${crypto.randomUUID()}`
@@ -400,7 +410,7 @@ export function createStorageManager({ db, uploadsDir, encryptionSecret }) {
       }
       return
     }
-    for (const mediaType of ['image', 'video']) {
+    for (const mediaType of managedMediaTypes) {
       const prefix = pathPrefixFor(provider.config, mediaType)
       const testKey = prefix
         ? `${prefix}/.picnest-write-test-${crypto.randomUUID()}`

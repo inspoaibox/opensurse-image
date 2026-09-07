@@ -114,10 +114,12 @@ try {
   await page.locator('#file-picker').setInputFiles([
     { name: '上线检查.png', mimeType: 'image/png', buffer: png },
     { name: '上线检查视频.mp4', mimeType: 'video/mp4', buffer: Buffer.from('PICNEST UI VIDEO TEST') },
+    { name: '上线检查文件.txt', mimeType: 'text/plain', buffer: Buffer.from('PICNEST UI FILE TEST') },
   ])
   await page.getByRole('heading', { name: '本次上传结果' }).waitFor()
-  await page.getByRole('button', { name: '选择图片或视频' }).waitFor()
+  await page.getByRole('button', { name: '选择图片、视频或文件' }).waitFor()
   await page.getByText('上线检查视频.mp4', { exact: true }).waitFor()
+  await page.getByText('上线检查文件.txt', { exact: true }).waitFor()
   assert.equal(await page.locator('input[readonly][value*="/media/"]').count() > 0, true)
   await page.screenshot({ path: path.join(outputDirectory, 'desktop-workbench.png'), fullPage: true })
 
@@ -137,7 +139,7 @@ try {
   await page.getByRole('heading', { name: '媒体库', exact: true }).waitFor()
   await page.getByRole('tab', { name: '视频' }).click()
   await page.getByRole('button', { name: '播放视频 上线检查视频.mp4' }).waitFor()
-  assert.equal(await page.getByRole('button', { name: '选择图片或视频' }).count(), 0)
+  assert.equal(await page.getByRole('button', { name: '选择图片、视频或文件' }).count(), 0)
   assert.equal(await page.locator('#file-picker').count(), 0)
   await page.screenshot({ path: path.join(outputDirectory, 'desktop-media-videos.png'), fullPage: true })
   await page.getByRole('button', { name: '播放视频 上线检查视频.mp4' }).waitFor()
@@ -151,6 +153,21 @@ try {
 
   await page.getByRole('tab', { name: '相册' }).click()
   assert.equal(await page.getByText('默认相册').count() > 0, true)
+
+  await page.getByRole('button', { name: '文件库' }).click()
+  await page.getByRole('heading', { name: '文件库', exact: true }).waitFor()
+  await page.getByRole('button', { name: '新建分组' }).click()
+  await page.getByLabel('分组名称').fill('UI 文档')
+  await page.getByRole('button', { name: '创建分组' }).click()
+  await page.getByRole('button', { name: /^UI 文档\s+0$/ }).waitFor()
+  await page.getByRole('button', { name: '查看文件 上线检查文件.txt' }).click()
+  await page.getByRole('button', { name: '重命名文件' }).click()
+  await page.getByLabel('重命名文件').fill('上线检查文件改名.pdf')
+  await page.getByRole('button', { name: '保存文件名称' }).click()
+  await page.getByRole('heading', { name: '上线检查文件改名.pdf', exact: true }).waitFor()
+  await page.getByLabel('复制文件直链').waitFor()
+  await page.getByRole('button', { name: '关闭文件查看' }).click()
+  await page.screenshot({ path: path.join(outputDirectory, 'desktop-files.png'), fullPage: true })
 
   await page.getByRole('button', { name: '统计分析' }).click()
   await page.getByRole('heading', { name: '统计分析', exact: true }).waitFor()
@@ -168,8 +185,9 @@ try {
 
   await page.getByRole('button', { name: '开发者' }).click()
   await page.getByRole('heading', { name: '开发者', exact: true }).waitFor()
-  await page.getByRole('heading', { name: '让图片和视频进入你的工作流', exact: true }).waitFor()
+  await page.getByRole('heading', { name: '让图片、视频和文件进入你的工作流', exact: true }).waitFor()
   assert.equal(await page.getByText('/api/videos', { exact: true }).count() > 0, true)
+  assert.equal(await page.getByText('/api/files', { exact: true }).count() > 0, true)
   await page.getByPlaceholder('密钥名称，例如：PicGo、生产服务器').fill('UI 验收')
   await page.getByRole('button', { name: '创建密钥' }).click()
   await page.getByText('UI 验收').waitFor()
@@ -177,8 +195,11 @@ try {
   await page.getByRole('heading', { name: 'API 文档' }).waitFor()
   await page.locator('#api-doc-remote-import').getByRole('heading', { name: '远程导入', exact: true }).waitFor()
   await page.getByRole('heading', { name: '上传视频', exact: true }).waitFor()
+  await page.getByRole('heading', { name: '上传文件', exact: true }).waitFor()
   await page.getByRole('heading', { name: '视频管理', exact: true }).waitFor()
   await page.getByRole('heading', { name: '视频分类', exact: true }).waitFor()
+  await page.getByRole('heading', { name: '文件管理', exact: true }).waitFor()
+  await page.getByRole('heading', { name: '文件分组', exact: true }).waitFor()
   await page.getByRole('button', { name: '关闭 API 文档' }).click()
 
   await page.getByRole('button', { name: '系统设置' }).click()
@@ -193,6 +214,9 @@ try {
     await page.getByRole('button', { name: section, exact: true }).click()
   }
   await page.getByRole('heading', { name: '存储与域名', exact: true }).waitFor()
+  await page.getByRole('button', { name: '编辑本地文件系统' }).click()
+  await page.getByLabel('文件存储目录').waitFor()
+  await page.getByRole('button', { name: '关闭存储配置' }).click()
   await page.getByRole('button', { name: '检测' }).click()
 
   await page.setViewportSize({ width: 390, height: 844 })
@@ -204,10 +228,15 @@ try {
   await page.getByRole('button', { name: '媒体库' }).click()
   await page.getByRole('tab', { name: '视频' }).click()
   await page.getByText('上线检查视频改名.mp4', { exact: true }).waitFor()
-  assert.equal(await page.getByRole('button', { name: '选择图片或视频' }).count(), 0)
+  assert.equal(await page.getByRole('button', { name: '选择图片、视频或文件' }).count(), 0)
   const mobileMediaMetrics = await page.evaluate(() => ({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth }))
   assert.equal(mobileMediaMetrics.scrollWidth <= mobileMediaMetrics.width + 1, true, `移动媒体库出现横向溢出：${JSON.stringify(mobileMediaMetrics)}`)
   await page.screenshot({ path: path.join(outputDirectory, 'mobile-media-videos.png'), fullPage: true })
+  await page.getByRole('button', { name: '文件库' }).click()
+  await page.getByText('上线检查文件改名.pdf', { exact: true }).waitFor()
+  const mobileFileMetrics = await page.evaluate(() => ({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth }))
+  assert.equal(mobileFileMetrics.scrollWidth <= mobileFileMetrics.width + 1, true, `移动文件库出现横向溢出：${JSON.stringify(mobileFileMetrics)}`)
+  await page.screenshot({ path: path.join(outputDirectory, 'mobile-files.png'), fullPage: true })
 
   await page.setViewportSize({ width: 768, height: 1024 })
   await page.getByRole('button', { name: '系统设置', exact: true }).click()
@@ -234,7 +263,7 @@ try {
   assert.deepEqual(pageErrors, [])
   assert.deepEqual(unexpectedHttpErrors, [])
 
-  console.log(JSON.stringify({ ok: true, browser: executablePath, screenshots: [path.join(outputDirectory, 'mobile-login.png'), path.join(outputDirectory, 'desktop-workbench.png'), path.join(outputDirectory, 'desktop-media-videos.png'), path.join(outputDirectory, 'mobile-workbench.png'), path.join(outputDirectory, 'mobile-media-videos.png')] }, null, 2))
+  console.log(JSON.stringify({ ok: true, browser: executablePath, screenshots: [path.join(outputDirectory, 'mobile-login.png'), path.join(outputDirectory, 'desktop-workbench.png'), path.join(outputDirectory, 'desktop-media-videos.png'), path.join(outputDirectory, 'desktop-files.png'), path.join(outputDirectory, 'mobile-workbench.png'), path.join(outputDirectory, 'mobile-media-videos.png'), path.join(outputDirectory, 'mobile-files.png')] }, null, 2))
 } finally {
   if (browser) await browser.close()
   if (!processOutput.exited) child.kill('SIGTERM')

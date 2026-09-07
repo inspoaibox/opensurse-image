@@ -21,7 +21,7 @@ const endpointGroups = [
       ['POST', '/api/images', '上传 1–20 张图片，multipart/form-data'],
       ['GET', '/api/images/:id', '获取当前用户的单张图片详情'],
       ['GET', '/api/images/:id/metadata', '读取尺寸、EXIF、GPS、XMP 等元数据'],
-      ['PATCH', '/api/images/:id', '修改名称、相册或收藏状态'],
+      ['PATCH', '/api/images/:id', '修改名称、相册、防盗链或收藏状态'],
       ['DELETE', '/api/images/:id', '删除图片记录与原文件'],
       ['POST', '/api/images/bulk-delete', '按 ID 数组批量删除图片'],
       ['GET', '/api/settings/image-processing', '读取系统图片处理默认策略'],
@@ -34,15 +34,29 @@ const endpointGroups = [
       ['GET', '/api/videos', '列出当前用户的全部视频'],
       ['POST', '/api/videos', '上传 1–10 个视频，multipart/form-data'],
       ['GET', '/api/videos/:id', '获取当前用户的单个视频详情'],
-      ['PATCH', '/api/videos/:id', '修改视频名称、分类或收藏状态'],
+      ['PATCH', '/api/videos/:id', '修改视频名称、分类、防盗链或收藏状态'],
       ['DELETE', '/api/videos/:id', '删除视频记录与原文件'],
       ['POST', '/api/videos/bulk-delete', '按 ID 数组批量删除视频'],
     ],
   },
   {
+    title: '文件接口',
+    rows: [
+      ['GET', '/api/files', '列出当前用户的全部文件'],
+      ['POST', '/api/files', '上传 1–20 个通用文件，multipart/form-data'],
+      ['GET', '/api/files/:id', '获取当前用户的单个文件详情'],
+      ['PATCH', '/api/files/:id', '修改文件名称、分组或收藏状态'],
+      ['DELETE', '/api/files/:id', '删除文件记录与原文件'],
+      ['POST', '/api/files/bulk-delete', '按 ID 数组批量删除文件'],
+      ['GET', '/api/file-groups', '列出文件分组及数量、空间统计'],
+      ['POST', '/api/file-groups', '创建文件分组'],
+      ['PATCH', '/api/file-groups/:id/default', '设置默认上传文件分组'],
+    ],
+  },
+  {
     title: '远程导入',
     rows: [
-      ['POST', '/api/remote-imports', '使用 URL 创建服务器端异步远程导入任务，支持图片和视频'],
+      ['POST', '/api/remote-imports', '使用 URL 创建服务器端异步远程导入任务，支持图片、视频和文件'],
       ['GET', '/api/remote-imports/:id', '使用任务创建者的会话或 API 密钥查询下载进度和结果'],
     ],
   },
@@ -71,6 +85,13 @@ const endpointGroups = [
     rows: [
       ['GET', '/media/video/:id/:filename.ext', '公开读取视频，支持 Range 断点播放'],
       ['GET', '/media/video/:id', '兼容无文件名视频地址'],
+    ],
+  },
+  {
+    title: '文件访问',
+    rows: [
+      ['GET', '/media/file/:id/:filename.ext', '公开下载文件，返回真实 Content-Type 与下载文件名'],
+      ['GET', '/media/file/:id', '兼容无文件名文件地址'],
     ],
   },
   {
@@ -172,6 +193,32 @@ const videoResponseExample = `[
   }
 ]`
 
+const fileResponseExample = `[
+  {
+    "id": "6e1ec44c-e642-49b4-bd4f-9224f5f08df8",
+    "name": "项目合同.pdf",
+    "filename": "项目合同.pdf",
+    "url": "https://img.example.com/media/file/6e1ec44c-e642-49b4-bd4f-9224f5f08df8/项目合同.pdf",
+    "path": "/media/file/6e1ec44c-e642-49b4-bd4f-9224f5f08df8/项目合同.pdf",
+    "type": "PDF",
+    "format": "pdf",
+    "extension": ".pdf",
+    "mimeType": "application/pdf",
+    "size": 1048576,
+    "group": "合同文档",
+    "groupName": "合同文档",
+    "starred": false,
+    "views": 0,
+    "links": {
+      "direct": "https://img.example.com/media/file/6e1ec44c-e642-49b4-bd4f-9224f5f08df8/项目合同.pdf",
+      "markdown": "[项目合同.pdf](https://img.example.com/media/file/6e1ec44c-e642-49b4-bd4f-9224f5f08df8/项目合同.pdf)",
+      "bbcode": "[url=https://img.example.com/media/file/6e1ec44c-e642-49b4-bd4f-9224f5f08df8/项目合同.pdf]项目合同.pdf[/url]",
+      "html": "<a href=\\"https://img.example.com/media/file/6e1ec44c-e642-49b4-bd4f-9224f5f08df8/项目合同.pdf\\" download>项目合同.pdf</a>"
+    },
+    "createdAt": "2026-07-14T08:30:00.000Z"
+  }
+]`
+
 const errorResponseExample = `{
   "message": "不允许上传 .heic 文件，允许类型：JPG、JPEG、PNG、GIF、WEBP、SVG"
 }`
@@ -199,6 +246,17 @@ const videoFields = [
   ['album', '兼容旧客户端的分类字段别名'],
   ['views', '通过 PicNest 媒体地址播放或读取时累计的访问次数'],
   ['hotlinkProtectionEnabled', '是否允许该视频参与系统防盗链校验；默认开启，可通过视频 PATCH 接口关闭'],
+]
+
+const fileFields = [
+  ['url', '带域名和真实后缀的完整文件直链'],
+  ['path', '站内相对路径，适合自行拼接域名'],
+  ['format / extension', '标准格式名和实际文件后缀'],
+  ['mimeType', '标准 MIME 类型，例如 application/pdf'],
+  ['links', '直链、Markdown、BBCode、HTML 下载链接'],
+  ['filename', '文件公开文件名；重命名后仍会保持真实文件格式扩展名'],
+  ['group / groupName', '文件所属分组；上传和修改时使用 group 或 groupName'],
+  ['views', '通过 PicNest 文件地址下载或读取时累计的访问次数'],
 ]
 
 const errorStatuses = [
@@ -229,11 +287,17 @@ const videoUploadCurlExample = (baseUrl: string) => `curl -X POST "${baseUrl}/ap
   -F "files=@screen-recording.webm" \\
   -F "category=产品演示"`
 
+const fileUploadCurlExample = (baseUrl: string) => `curl -X POST "${baseUrl}/api/files" \\
+  -H "Authorization: Bearer pn_live_xxx" \\
+  -F "files=@contract.pdf" \\
+  -F "files=@brief.zip" \\
+  -F "group=合同文档"`
+
 const remoteImportCurlExample = (baseUrl: string) => `# 创建远程导入任务
 curl -X POST "${baseUrl}/api/remote-imports" \\
   -H "Authorization: Bearer pn_live_xxx" \\
   -H "Content-Type: application/json" \\
-  -d '{"url":"https://static.atlascloud.ai/prompt/seedance/seedance-2-0-prompts_4512_1.mp4","category":"远程视频","connections":8}'
+  -d '{"url":"https://static.atlascloud.ai/prompt/seedance/seedance-2-0-prompts_4512_1.mp4","category":"远程视频","fileGroup":"远程文件","connections":8}'
 
 # 使用返回的任务 ID 查询进度
 curl "${baseUrl}/api/remote-imports/TASK_ID" \\
@@ -269,6 +333,36 @@ curl -X POST "${baseUrl}/api/video-categories" \\
 curl -X PATCH "${baseUrl}/api/video-categories/category-id/default" \\
   -H "Authorization: Bearer pn_live_xxx"`
 
+const fileManagementCurlExample = (baseUrl: string) => `# 查询文件列表
+curl "${baseUrl}/api/files" \\
+  -H "Authorization: Bearer pn_live_xxx"
+
+# 修改文件名称、分组或收藏状态
+curl -X PATCH "${baseUrl}/api/files/file-id" \\
+  -H "Authorization: Bearer pn_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name":"新版合同.pdf","group":"合同文档","starred":true}'
+
+# 批量删除文件
+curl -X POST "${baseUrl}/api/files/bulk-delete" \\
+  -H "Authorization: Bearer pn_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"ids":["file-id-1","file-id-2"]}'`
+
+const fileGroupCurlExample = (baseUrl: string) => `# 查询文件分组
+curl "${baseUrl}/api/file-groups" \\
+  -H "Authorization: Bearer pn_live_xxx"
+
+# 创建文件分组
+curl -X POST "${baseUrl}/api/file-groups" \\
+  -H "Authorization: Bearer pn_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name":"合同文档"}'
+
+# 设置默认文件分组
+curl -X PATCH "${baseUrl}/api/file-groups/group-id/default" \\
+  -H "Authorization: Bearer pn_live_xxx"`
+
 const markdownCodeBlock = (language: string, content: string) => `\`\`\`${language}\n${content}\n\`\`\``
 const markdownTableCell = (value: string) => value.replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
 
@@ -282,6 +376,7 @@ const buildMarkdownDocs = (baseUrl: string) => {
     '',
   ])
   const fieldRows = imageFields.map(([field, description]) => `| \`${field}\` | ${description} |`)
+  const fileFieldRows = fileFields.map(([field, description]) => `| \`${field}\` | ${description} |`)
   const statusRows = errorStatuses.map(([status, description]) => `| ${status} | ${description} |`)
 
   return [
@@ -289,7 +384,7 @@ const buildMarkdownDocs = (baseUrl: string) => {
     '',
     `> API 基础地址：\`${baseUrl}\``,
     '',
-    '接口返回 JSON，图片和视频内容通过带真实后缀的 PicNest 媒体地址访问。生产部署建议设置 `PICNEST_PUBLIC_URL`，确保反向代理、脚本和返回媒体地址使用一致的公网域名。',
+    '接口返回 JSON，图片、视频和文件内容通过带真实后缀的 PicNest 资源地址访问。生产部署建议设置 `PICNEST_PUBLIC_URL`，确保反向代理、脚本和返回资源地址使用一致的公网域名。',
     '',
     '## 基本约定',
     '',
@@ -300,7 +395,7 @@ const buildMarkdownDocs = (baseUrl: string) => {
     '',
     '## 身份认证',
     '',
-    '自动化客户端在请求头中携带 Bearer 密钥。每把密钥只会访问其所属用户的图片、视频、相册、配额和统计数据。',
+    '自动化客户端在请求头中携带 Bearer 密钥。每把密钥只会访问其所属用户的图片、视频、文件、分组、配额和统计数据。',
     '',
     markdownCodeBlock('http', 'Authorization: Bearer $PICNEST_TOKEN'),
     '',
@@ -330,13 +425,21 @@ const buildMarkdownDocs = (baseUrl: string) => {
     '',
     '视频不会经过图片处理引擎，服务端会校验扩展名与请求 MIME 类型，并按原始字节保存。返回对象包含可公开访问的直链、Markdown、BBCode 和 HTML5 video 引用，以及 `category` 分类字段。视频媒体地址支持 `Range` 请求，浏览器可以按需加载、拖动进度和断点播放。',
     '',
+    '## 上传文件',
+    '',
+    '`POST /api/files` 单次最多上传 20 个通用文件，单个大小上限由服务端环境变量 `PICNEST_FILE_MAX_MB` 控制，默认 1024 MB。重复提交 `files` 字段即可批量上传；可选的 `group` 或 `groupName` 字段指定文件分组，未填写时使用默认文件分组。',
+    '',
+    markdownCodeBlock('bash', fileUploadCurlExample(baseUrl)),
+    '',
+    '文件不会经过图片或视频处理引擎，服务端会校验扩展名白名单并按原始字节保存。默认支持常见 Office、PDF、文本、代码、压缩包、音频和设计源文件；请通过 `GET /api/public/config` 读取当前文件白名单和大小上限。',
+    '',
     '## 远程导入',
     '',
-    '`POST /api/remote-imports` 接收 JSON 中的 `url` 或 `source`，由 PicNest 服务器直接下载远程 HTTP/HTTPS 媒体。支持 Bearer API 密钥或网页登录会话；接口立即返回 `202` 和任务对象，客户端应使用 `GET /api/remote-imports/:id` 轮询状态。',
+    '`POST /api/remote-imports` 接收 JSON 中的 `url` 或 `source`，由 PicNest 服务器直接下载远程 HTTP/HTTPS 资源。支持 Bearer API 密钥或网页登录会话；接口立即返回 `202` 和任务对象，客户端应使用 `GET /api/remote-imports/:id` 轮询状态。',
     '',
     markdownCodeBlock('bash', remoteImportCurlExample(baseUrl)),
     '',
-    '`category` 仅在最终识别为视频时使用，`album` 仅在最终识别为图片时使用；`connections` 可选，范围为 1–16。服务端会根据实际图片格式或视频扩展名/MIME 类型自动分流，任务完成后 `result` 返回对应的图片或视频对象。仅允许 HTTP/HTTPS，默认拒绝本机、局域网和其他私有地址。',
+    '`category` 仅在最终识别为视频时使用，`album` 仅在最终识别为图片时使用，`fileGroup` 或 `group` 仅在最终识别为文件时使用；`connections` 可选，范围为 1–16。服务端会根据实际图片格式、视频扩展名/MIME 类型或文件扩展名/MIME 类型自动分流，任务完成后 `result` 返回对应的图片、视频或文件对象。仅允许 HTTP/HTTPS，默认拒绝本机、局域网和其他私有地址。',
     '',
     '## 媒体防盗链',
     '',
@@ -393,6 +496,32 @@ curl -X PATCH "${baseUrl}/api/videos/VIDEO_ID" \\
     ...videoFields.map(([field, description]) => `| \`${field}\` | ${description} |`),
     '',
     '视频公开地址不要求登录，删除和列表接口仍只允许所有者或其 Bearer 密钥访问。媒体响应支持 `Accept-Ranges: bytes`；请求 `Range: bytes=0-1048575` 时返回 `206 Partial Content`。',
+    '',
+    '## 文件对象完整响应',
+    '',
+    '`POST /api/files` 和 `GET /api/files` 返回文件对象数组；`GET /api/files/:id` 与修改接口返回单个文件对象。成功上传的 HTTP 状态为 `201`。',
+    '',
+    markdownCodeBlock('json', fileResponseExample),
+    '',
+    '### 字段说明',
+    '',
+    '| 字段 | 说明 |',
+    '| --- | --- |',
+    ...fileFieldRows,
+    '',
+    '文件公开地址不要求登录，删除和列表接口仍只允许所有者或其 Bearer 密钥访问。文件响应默认使用 `Content-Disposition: attachment`，浏览器会按下载处理，适合分享文档、压缩包和交付文件。',
+    '',
+    '## 文件管理',
+    '',
+    '使用 `GET /api/files` 查询列表，使用 `GET /api/files/:id` 查询单个文件；`PATCH /api/files/:id` 可修改 `name`、`group` 和 `starred`，`POST /api/files/bulk-delete` 可按 ID 数组批量删除。',
+    '',
+    markdownCodeBlock('bash', fileManagementCurlExample(baseUrl)),
+    '',
+    '## 文件分组',
+    '',
+    '`GET /api/file-groups` 返回当前用户的文件分组、默认分组标记、文件数量和占用空间。`POST /api/file-groups` 创建分组，名称长度为 1–100 个字符，每位用户最多 500 个分组；`PATCH /api/file-groups/:id/default` 设置默认上传分组。文件分组与图片相册、视频分类独立管理。',
+    '',
+    markdownCodeBlock('bash', fileGroupCurlExample(baseUrl)),
     '',
     '## 视频管理',
     '',
@@ -472,33 +601,37 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
 
   return <div className="modal-backdrop api-doc-backdrop" onMouseDown={onClose}>
     <div className="api-doc-modal" role="dialog" aria-modal="true" aria-labelledby="api-doc-title" onMouseDown={(event) => event.stopPropagation()}>
-      <header><span><small>PicNest Developer</small><h2>API 文档</h2><p>接口返回 JSON，图片和视频内容通过带真实后缀的 PicNest 媒体地址访问。</p></span><div className="api-doc-header-actions"><button type="button" className="api-doc-copy-all" onClick={() => void copyAllMarkdown()} aria-live="polite" aria-label="复制全部 API 文档为 Markdown" title="复制全部 API 文档为 Markdown">{allCopyState === 'copied' ? <Check size={16} /> : <Copy size={15} />}<span>{allCopyState === 'copied' ? '已复制全部内容' : allCopyState === 'failed' ? '复制失败' : '复制全部 Markdown'}</span></button><button type="button" className="api-doc-close" onClick={onClose} aria-label="关闭 API 文档"><X size={19} /></button></div></header>
+      <header><span><small>PicNest Developer</small><h2>API 文档</h2><p>接口返回 JSON，图片、视频和文件内容通过带真实后缀的 PicNest 资源地址访问。</p></span><div className="api-doc-header-actions"><button type="button" className="api-doc-copy-all" onClick={() => void copyAllMarkdown()} aria-live="polite" aria-label="复制全部 API 文档为 Markdown" title="复制全部 API 文档为 Markdown">{allCopyState === 'copied' ? <Check size={16} /> : <Copy size={15} />}<span>{allCopyState === 'copied' ? '已复制全部内容' : allCopyState === 'failed' ? '复制失败' : '复制全部 Markdown'}</span></button><button type="button" className="api-doc-close" onClick={onClose} aria-label="关闭 API 文档"><X size={19} /></button></div></header>
       <div className="api-doc-layout">
         <aside>
           <b>文档目录</b>
           <a href="#api-doc-overview">基本约定</a>
           <a href="#api-doc-auth">身份认证</a>
           <a href="#api-doc-upload">上传图片</a>
-          <a href="#api-doc-remote-import">远程导入</a>
-          <a href="#api-doc-hotlink-protection">媒体防盗链</a>
           <a href="#api-doc-response">图片对象</a>
           <a href="#api-doc-video-upload">上传视频</a>
           <a href="#api-doc-video-response">视频对象</a>
           <a href="#api-doc-video-management">视频管理</a>
           <a href="#api-doc-video-categories">视频分类</a>
+          <a href="#api-doc-file-upload">上传文件</a>
+          <a href="#api-doc-file-response">文件对象</a>
+          <a href="#api-doc-file-management">文件管理</a>
+          <a href="#api-doc-file-groups">文件分组</a>
+          <a href="#api-doc-remote-import">远程导入</a>
+          <a href="#api-doc-hotlink-protection">媒体防盗链</a>
           <a href="#api-doc-endpoints">全部接口</a>
           <a href="#api-doc-errors">错误与限制</a>
         </aside>
         <main>
           <section id="api-doc-overview">
             <h3 id="api-doc-title">基本约定</h3>
-            <p>当前 API 基础地址为 <code>{baseUrl}</code>。生产部署建议设置 <code>PICNEST_PUBLIC_URL</code>，确保反向代理、脚本和返回图片地址使用一致的公网域名。</p>
+            <p>当前 API 基础地址为 <code>{baseUrl}</code>。生产部署建议设置 <code>PICNEST_PUBLIC_URL</code>，确保反向代理、脚本和返回资源地址使用一致的公网域名。</p>
             <ul><li>请求与响应编码：<code>UTF-8</code></li><li>普通请求：<code>application/json</code></li><li>上传请求：<code>multipart/form-data</code></li><li>时间格式：ISO 8601，例如 <code>2026-07-14T08:30:00.000Z</code></li></ul>
           </section>
 
           <section id="api-doc-auth">
             <h3>身份认证</h3>
-            <p>自动化客户端在请求头中携带 Bearer 密钥。每把密钥只会访问其所属用户的图片、视频、相册、配额和统计数据。</p>
+            <p>自动化客户端在请求头中携带 Bearer 密钥。每把密钥只会访问其所属用户的图片、视频、文件、分组、配额和统计数据。</p>
             <ApiCode>{`Authorization: Bearer $PICNEST_TOKEN`}</ApiCode>
             <p>密钥的创建、查看与删除只能通过网页登录会话执行，不能使用 Bearer 密钥管理其他密钥。</p>
           </section>
@@ -529,11 +662,18 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
             <p>视频不会经过图片处理引擎，服务端会校验扩展名与请求 MIME 类型，并按原始字节保存。返回对象包含直链、Markdown、BBCode 和 HTML5 video 引用，以及 <code>category</code> 分类字段；视频媒体地址支持 <code>Range</code> 请求，适合浏览器按需加载和拖动进度。</p>
           </section>
 
+          <section id="api-doc-file-upload">
+            <h3>上传文件</h3>
+            <p><code>POST /api/files</code> 单次最多上传 20 个通用文件，单个大小上限由服务端环境变量 <code>PICNEST_FILE_MAX_MB</code> 控制，默认 1024 MB。可选 <code>group</code> 或 <code>groupName</code> 指定文件分组，未填写时使用默认文件分组。</p>
+            <ApiCode>{fileUploadCurlExample(baseUrl)}</ApiCode>
+            <p>文件不会经过图片或视频处理引擎，服务端会校验扩展名白名单并按原始字节保存。默认支持 Office、PDF、文本、代码、压缩包、音频和设计源文件；请通过 <code>GET /api/public/config</code> 读取当前文件白名单和大小上限。</p>
+          </section>
+
           <section id="api-doc-remote-import">
             <h3>远程导入</h3>
-            <p><code>POST /api/remote-imports</code> 接收 JSON 中的 <code>url</code> 或 <code>source</code>，由 PicNest 服务器直接下载远程 HTTP/HTTPS 媒体。支持 Bearer API 密钥或网页登录会话；接口立即返回 <code>202</code> 和任务对象，客户端应使用 <code>GET /api/remote-imports/:id</code> 轮询状态。</p>
+            <p><code>POST /api/remote-imports</code> 接收 JSON 中的 <code>url</code> 或 <code>source</code>，由 PicNest 服务器直接下载远程 HTTP/HTTPS 资源。支持 Bearer API 密钥或网页登录会话；接口立即返回 <code>202</code> 和任务对象，客户端应使用 <code>GET /api/remote-imports/:id</code> 轮询状态。</p>
             <ApiCode>{remoteImportCurlExample(baseUrl)}</ApiCode>
-            <p><code>category</code> 仅在最终识别为视频时使用，<code>album</code> 仅在最终识别为图片时使用；<code>connections</code> 可选，范围为 1–16。服务端会根据实际图片格式或视频扩展名/MIME 类型自动分流，任务完成后 <code>result</code> 返回对应的图片或视频对象。仅允许 HTTP/HTTPS，默认拒绝本机、局域网和其他私有地址。</p>
+            <p><code>category</code> 仅在最终识别为视频时使用，<code>album</code> 仅在最终识别为图片时使用，<code>fileGroup</code> 或 <code>group</code> 仅在最终识别为文件时使用；<code>connections</code> 可选，范围为 1–16。服务端会根据实际图片格式、视频扩展名/MIME 类型或文件扩展名/MIME 类型自动分流，任务完成后 <code>result</code> 返回对应的图片、视频或文件对象。仅允许 HTTP/HTTPS，默认拒绝本机、局域网和其他私有地址。</p>
           </section>
 
           <section id="api-doc-hotlink-protection">
@@ -578,6 +718,26 @@ curl -X PATCH "${baseUrl}/api/videos/VIDEO_ID" \\
             <h3>视频分类</h3>
             <p><code>GET /api/video-categories</code> 返回当前用户的视频分类、默认分类标记、视频数量、占用空间和最近视频封面。<code>POST /api/video-categories</code> 创建分类，名称长度为 1–100 个字符，每位用户最多 500 个分类；<code>PATCH /api/video-categories/:id/default</code> 设置默认上传分类。视频分类与图片相册独立管理。</p>
             <ApiCode>{videoCategoryCurlExample(baseUrl)}</ApiCode>
+          </section>
+
+          <section id="api-doc-file-response">
+            <h3>文件对象完整响应</h3>
+            <p><code>POST /api/files</code> 和 <code>GET /api/files</code> 返回文件对象数组；<code>GET /api/files/:id</code> 与修改接口返回单个文件对象。成功上传的 HTTP 状态为 <code>201</code>。</p>
+            <ApiCode>{fileResponseExample}</ApiCode>
+            <div className="api-doc-field-table">{fileFields.map(([field, description]) => <span key={field}><b>{field}</b><small>{description}</small></span>)}</div>
+            <p className="api-doc-note">文件公开地址不要求登录，删除和列表接口仍只允许所有者或其 Bearer 密钥访问。文件响应默认使用 <code>Content-Disposition: attachment</code>，浏览器会按下载处理，适合分享文档、压缩包和交付文件。</p>
+          </section>
+
+          <section id="api-doc-file-management">
+            <h3>文件管理</h3>
+            <p>使用 <code>GET /api/files</code> 查询列表，使用 <code>GET /api/files/:id</code> 查询单个文件；<code>PATCH /api/files/:id</code> 可修改 <code>name</code>、<code>group</code> 和 <code>starred</code>，<code>POST /api/files/bulk-delete</code> 可按 ID 数组批量删除。</p>
+            <ApiCode>{fileManagementCurlExample(baseUrl)}</ApiCode>
+          </section>
+
+          <section id="api-doc-file-groups">
+            <h3>文件分组</h3>
+            <p><code>GET /api/file-groups</code> 返回当前用户的文件分组、默认分组标记、文件数量和占用空间。<code>POST /api/file-groups</code> 创建分组，名称长度为 1–100 个字符，每位用户最多 500 个分组；<code>PATCH /api/file-groups/:id/default</code> 设置默认上传分组。文件分组与图片相册、视频分类独立管理。</p>
+            <ApiCode>{fileGroupCurlExample(baseUrl)}</ApiCode>
           </section>
 
           <section id="api-doc-endpoints">
