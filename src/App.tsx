@@ -173,8 +173,33 @@ const rootFileGroup = (groups: FileGroupItem[]) => groups.find((group) => group.
 const rootFileGroupName = (groups: FileGroupItem[]) => rootFileGroup(groups)?.name || '文件'
 const fileDirectoryLabel = (file: FileItem, rootGroupName = '文件') => fileGroupName(file) === rootGroupName ? '根目录' : fileGroupName(file)
 
+type LibraryLayout = 'grid' | 'list'
 type VideoUploadPhase = 'uploading' | 'processing'
 type UploadPhase = 'images' | 'videos' | 'files' | null
+
+const readStoredLibraryLayout = (storageKey: string): LibraryLayout => {
+  if (typeof window === 'undefined') return 'grid'
+  try {
+    const value = window.localStorage.getItem(storageKey)
+    return value === 'list' || value === 'grid' ? value : 'grid'
+  } catch {
+    return 'grid'
+  }
+}
+
+const useStoredLibraryLayout = (storageKey: string) => {
+  const [layout, setLayout] = useState<LibraryLayout>(() => readStoredLibraryLayout(storageKey))
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(storageKey, layout)
+    } catch {
+      /* Keep the UI usable when browser storage is unavailable. */
+    }
+  }, [layout, storageKey])
+
+  return [layout, setLayout] as const
+}
 
 interface VideoUploadStatus {
   phase: VideoUploadPhase
@@ -1749,7 +1774,7 @@ function GalleryView({ images, albums, selectedAlbum, onAlbumChange, loading, on
 }) {
   const [query, setQuery] = useState('')
   const [type, setType] = useState('全部格式')
-  const [layout, setLayout] = useState<'grid' | 'list'>('grid')
+  const [layout, setLayout] = useStoredLibraryLayout('picnest.gallery.layout')
   const [selected, setSelected] = useState<string[]>([])
   const albumOptions = useMemo(() => ['全部相册', ...Array.from(new Set([...albums.map((album) => album.name), ...images.map((image) => image.album)]))], [albums, images])
   const typeOptions = useMemo(() => ['全部格式', ...Array.from(new Set(images.map((image) => image.type))).sort()], [images])
@@ -1934,7 +1959,7 @@ function FileLibraryView({ files, groups, selectedGroup, onGroupChange, onGroupC
 }) {
   const [query, setQuery] = useState('')
   const [type, setType] = useState('全部格式')
-  const [layout, setLayout] = useState<'grid' | 'list'>('grid')
+  const [layout, setLayout] = useStoredLibraryLayout('picnest.files.layout')
   const [selected, setSelected] = useState<string[]>([])
   const [showNewGroup, setShowNewGroup] = useState(false)
   const [newGroup, setNewGroup] = useState('')
