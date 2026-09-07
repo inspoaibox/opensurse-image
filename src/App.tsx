@@ -19,6 +19,8 @@ import {
   ExternalLink,
   FileText,
   Files,
+  Folder,
+  FolderOpen,
   FolderPlus,
   Gauge,
   Grid2X2,
@@ -167,6 +169,9 @@ const formatAnalyticsDate = (value: string) => {
 
 const videoCategoryName = (video: VideoItem) => video.category || video.album || '视频'
 const fileGroupName = (file: FileItem) => file.groupName || file.group || '文件'
+const rootFileGroup = (groups: FileGroupItem[]) => groups.find((group) => group.name === '文件') || groups.find((group) => group.isDefault) || groups[0]
+const rootFileGroupName = (groups: FileGroupItem[]) => rootFileGroup(groups)?.name || '文件'
+const fileDirectoryLabel = (file: FileItem, rootGroupName = '文件') => fileGroupName(file) === rootGroupName ? '根目录' : fileGroupName(file)
 
 type VideoUploadPhase = 'uploading' | 'processing'
 type UploadPhase = 'images' | 'videos' | 'files' | null
@@ -1104,6 +1109,7 @@ function App() {
         <FileShareModal
           file={shareFile}
           groups={fileGroups}
+          rootGroupName={rootFileGroupName(fileGroups)}
           onClose={() => setShareFile(null)}
           onPatch={patchFile}
           onDelete={() => {
@@ -1934,22 +1940,45 @@ function FileLibraryView({ files, groups, selectedGroup, onGroupChange, onGroupC
   const [newGroup, setNewGroup] = useState('')
   const [creatingGroup, setCreatingGroup] = useState(false)
   const typeOptions = useMemo(() => ['全部格式', ...Array.from(new Set(files.map((file) => file.type))).sort()], [files])
-  const groupOptions = useMemo(() => ['全部分组', ...Array.from(new Set([...groups.map((group) => group.name), ...files.map(fileGroupName)]))], [groups, files])
-  const filtered = files.filter((file) => {
-    const matchQuery = file.name.toLowerCase().includes(query.toLowerCase())
+  const rootGroup = useMemo(() => rootFileGroup(groups), [groups])
+  const rootGroupName = rootGroup?.name || '文件'
+  const isRoot = selectedGroup === '全部分组' || !groups.some((group) => group.name === selectedGroup)
+  const queryText = query.trim().toLowerCase()
+  const hasFilters = Boolean(queryText) || type !== '全部格式'
+  const folders = groups.filter((group) => group.name !== rootGroupName)
+  const visibleFolders = isRoot && type === '全部格式'
+    ? folders.filter((group) => !queryText || group.name.toLowerCase().includes(queryText))
+    : []
+  const visibleFiles = files.filter((file) => {
+    const matchQuery = file.name.toLowerCase().includes(queryText)
     const matchType = type === '全部格式' || file.type === type
-    const matchGroup = selectedGroup === '全部分组' || fileGroupName(file) === selectedGroup
-    return matchQuery && matchType && matchGroup
+    const matchDirectory = isRoot
+      ? fileGroupName(file) === rootGroupName
+      : fileGroupName(file) === selectedGroup
+    return matchQuery && matchType && matchDirectory
   })
+  const currentGroup = isRoot ? rootGroup : groups.find((group) => group.name === selectedGroup)
+  const rootFileCount = files.filter((file) => fileGroupName(file) === rootGroupName).length
+  const visibleItemCount = visibleFolders.length + visibleFiles.length
 
-  useEffect(() => setSelected([]), [selectedGroup])
+  useEffect(() => setSelected([]), [selectedGroup, query, type])
 
   const toggleSelect = (id: string) => setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
+  const openRoot = () => {
+    onGroupChange('全部分组')
+    setQuery('')
+    setType('全部格式')
+  }
+  const openFolder = (name: string) => {
+    onGroupChange(name)
+    setQuery('')
+    setType('全部格式')
+  }
 
   const createGroup = async () => {
     const value = newGroup.trim()
     if (!value || creatingGroup) return
-    if (value.length > 100) return notify('文件分组名称不能超过 100 个字符')
+    if (value.length > 100) return notify('文件夹名称不能超过 100 个字符')
     setCreatingGroup(true)
     try {
       const response = await fetch('/api/file-groups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: value }) })
@@ -1958,9 +1987,9 @@ function FileLibraryView({ files, groups, selectedGroup, onGroupChange, onGroupC
       onGroupCreated(detail as FileGroupItem)
       setNewGroup('')
       setShowNewGroup(false)
-      notify('新文件分组已创建')
+      notify('新文件夹已创建')
     } catch {
-      notify('文件分组创建失败，请重试')
+      notify('文件夹创建失败，请重试')
     } finally {
       setCreatingGroup(false)
     }
@@ -1968,41 +1997,56 @@ function FileLibraryView({ files, groups, selectedGroup, onGroupChange, onGroupC
 
   return (
     <div className="file-library-page">
-      <section className="video-category-panel file-group-panel section-card">
-        <div className="page-action-row">
-          <div><h3>{groups.length} 个文件分组</h3><p>按项目、合同、素材包或交付物整理文档与文件</p></div>
-          <button className="button button-secondary" onClick={() => setShowNewGroup(true)}><FolderPlus size={16} /> 新建分组</button>
+      <section className="file-path-panel section-card">
+        <div className="file-path-heading">
+          <div>
+            <h3>{isRoot ? '根目录' : selectedGroup}</h3>
+            <p>{isRoot ? `${folders.length} 个文件夹 · ${rootFileCount} 个根目录文件` : `${visibleFiles.length} 个文件 · ${formatBytes(currentGroup?.storageUsed || 0)}`}</p>
+          </div>
+          <div className="file-path-actions">
+            {currentGroup && (
+              <button className={`directory-default-button ${currentGroup.isDefault ? 'active' : ''}`} onClick={() => void onSetDefaultGroup(currentGroup.id)} disabled={currentGroup.isDefault} aria-label={currentGroup.isDefault ? '当前目录是默认上传位置' : '将当前目录设为默认上传位置'} title={currentGroup.isDefault ? '默认上传位置' : '设为默认上传位置'}>
+                <Star size={15} fill={currentGroup.isDefault ? 'currentColor' : 'none'} />
+                <span>{currentGroup.isDefault ? '默认上传位置' : '设为默认上传位置'}</span>
+              </button>
+            )}
+            <button className="button button-secondary" onClick={() => setShowNewGroup(true)}><FolderPlus size={16} /> 新建文件夹</button>
+          </div>
         </div>
-        <div className="video-category-chips file-group-chips">
-          <button className={`video-category-chip ${selectedGroup === '全部分组' ? 'active' : ''}`} onClick={() => onGroupChange('全部分组')} aria-pressed={selectedGroup === '全部分组'}><Files size={15} /><span>全部文件</span><em>{files.length}</em></button>
-          {groups.map((group) => (
-            <div className={`video-category-chip-wrap ${selectedGroup === group.name ? 'active' : ''}`} key={group.id}>
-              <button className="video-category-chip" onClick={() => onGroupChange(group.name)} aria-pressed={selectedGroup === group.name}><FolderPlus size={15} /><span>{group.name}</span><em>{group.fileCount}</em></button>
-              <button className={`video-category-default ${group.isDefault ? 'active' : ''}`} onClick={() => void onSetDefaultGroup(group.id)} disabled={group.isDefault} aria-label={group.isDefault ? `${group.name}是默认分组` : `将${group.name}设为默认分组`} title={group.isDefault ? '默认文件分组' : '设为默认文件分组'}><Star size={14} fill={group.isDefault ? 'currentColor' : 'none'} /></button>
-            </div>
-          ))}
-        </div>
+        <nav className="file-breadcrumb" aria-label="文件路径">
+          <button className={isRoot ? 'active' : ''} onClick={openRoot} disabled={isRoot}><Files size={15} /> 根目录</button>
+          {!isRoot && <><ArrowRight size={14} /><span>{selectedGroup}</span></>}
+        </nav>
+        <div className="file-path-tip">默认进入根目录，根目录会显示所有文件夹和直接存放在根目录下的文件。</div>
       </section>
 
       <section className="video-toolbar file-toolbar section-card">
-        <label className="gallery-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="按文件名称搜索" /></label>
-        <select value={selectedGroup} onChange={(event) => onGroupChange(event.target.value)} aria-label="筛选文件分组">{groupOptions.map((name) => <option key={name}>{name}</option>)}</select>
+        <label className="gallery-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={isRoot ? '搜索当前目录' : '按文件名称搜索'} /></label>
         <select value={type} onChange={(event) => setType(event.target.value)} aria-label="筛选文件格式">{typeOptions.map((name) => <option key={name}>{name}</option>)}</select>
         <div className="layout-toggle"><button className={layout === 'grid' ? 'active' : ''} onClick={() => setLayout('grid')} aria-label="文件网格视图"><Grid2X2 size={17} /></button><button className={layout === 'list' ? 'active' : ''} onClick={() => setLayout('list')} aria-label="文件列表视图"><List size={18} /></button></div>
       </section>
 
       <div className="gallery-summary">
-        <div><h3>{filtered.length} 个文件</h3><p>{query || type !== '全部格式' || selectedGroup !== '全部分组' ? '当前筛选结果' : '你的全部文件资产'}</p></div>
+        <div><h3>{isRoot ? `${visibleFolders.length} 个文件夹 · ${visibleFiles.length} 个文件` : `${visibleFiles.length} 个文件`}</h3><p>{hasFilters ? '当前筛选结果' : isRoot ? '根目录内容' : `位于 ${selectedGroup}`}</p></div>
         {selected.length > 0 && (
           <div className="bulk-actions"><span>已选择 {selected.length} 项</span><button onClick={() => { if (window.confirm(`确认永久删除选中的 ${selected.length} 个文件吗？此操作无法撤销。`)) { void onDelete(selected); setSelected([]) } }}><Trash2 size={15} /> 删除</button><button onClick={() => setSelected([])}><X size={15} /> 取消</button></div>
         )}
       </div>
 
-      {loading ? <CardSkeletons /> : filtered.length === 0 ? (
-        <div className="empty-state"><span><FileText size={28} /></span><h3>{files.length ? '没有找到文件' : '文件库还是空的'}</h3><p>{files.length ? '试试调整关键词、分组或格式筛选。' : '前往工作台选择文件，上传后会自动进入文件分组。'}</p></div>
+      {loading ? <CardSkeletons /> : visibleItemCount === 0 ? (
+        <div className="empty-state"><span>{isRoot ? <FolderOpen size={28} /> : <FileText size={28} />}</span><h3>{files.length || folders.length ? '没有找到内容' : '文件库还是空的'}</h3><p>{files.length || folders.length ? '试试调整关键词或格式筛选。' : '前往工作台选择文件，上传后会出现在根目录或对应文件夹。'}</p></div>
       ) : layout === 'grid' ? (
-        <div className="file-grid">
-          {filtered.map((file) => (
+        <div className="directory-grid file-grid">
+          {visibleFolders.map((folder) => (
+            <article className={`folder-card ${folder.isDefault ? 'default' : ''}`} key={folder.id}>
+              <button className="folder-open-button" onClick={() => openFolder(folder.name)} aria-label={`打开文件夹 ${folder.name}`}>
+                <span className="folder-card-icon"><Folder size={34} /></span>
+                <span className="folder-card-meta"><b title={folder.name}>{folder.name}</b><small>{folder.fileCount} 个文件 · {formatBytes(folder.storageUsed)}</small></span>
+              </button>
+              <button className={`folder-default-button ${folder.isDefault ? 'active' : ''}`} onClick={() => void onSetDefaultGroup(folder.id)} disabled={folder.isDefault} aria-label={folder.isDefault ? `${folder.name}是默认上传文件夹` : `将${folder.name}设为默认上传文件夹`} title={folder.isDefault ? '默认上传文件夹' : '设为默认上传文件夹'}><Star size={15} fill={folder.isDefault ? 'currentColor' : 'none'} /></button>
+            </article>
+          ))}
+          {visibleFiles.map((file) => (
             <article className={`file-card ${selected.includes(file.id) ? 'selected' : ''}`} key={file.id}>
               <div className="file-card-main">
                 <button className="file-open-button" onClick={() => onShare(file)} aria-label={`查看文件 ${file.name}`} title="查看文件">
@@ -2015,17 +2059,26 @@ function FileLibraryView({ files, groups, selectedGroup, onGroupChange, onGroupC
                   <button onClick={() => onShare(file)} aria-label="分享"><Share2 size={16} /></button>
                 </div>
               </div>
-              <div className="image-card-meta"><b title={file.name}>{file.name}</b><span>{fileGroupName(file)} · {formatBytes(file.size)} · {formatDate(file.createdAt)}</span></div>
+              <div className="image-card-meta"><b title={file.name}>{file.name}</b><span>{fileDirectoryLabel(file, rootGroupName)} · {formatBytes(file.size)} · {formatDate(file.createdAt)}</span></div>
             </article>
           ))}
         </div>
       ) : (
-        <div className="image-list file-list section-card">
-          {filtered.map((file) => (
+        <div className="image-list file-list directory-list section-card">
+          {visibleFolders.map((folder) => (
+            <div className="image-list-row file-list-row folder-list-row" key={folder.id}>
+              <span />
+              <button className="file-list-open folder-list-open" onClick={() => openFolder(folder.name)} aria-label={`打开文件夹 ${folder.name}`} title="打开文件夹"><FolderOpen size={19} /></button>
+              <div className="list-name"><b>{folder.name}</b><span>{folder.isDefault ? '默认上传文件夹' : '文件夹'}</span></div>
+              <span>文件夹</span><span>{formatBytes(folder.storageUsed)}</span><span>{folder.fileCount} 个文件</span>
+              <div className="list-actions"><button onClick={() => void onSetDefaultGroup(folder.id)} disabled={folder.isDefault} aria-label={folder.isDefault ? `${folder.name}是默认上传文件夹` : `将${folder.name}设为默认上传文件夹`}><Star size={16} fill={folder.isDefault ? 'currentColor' : 'none'} /></button><button onClick={() => openFolder(folder.name)} aria-label={`进入${folder.name}`}><ArrowRight size={16} /></button></div>
+            </div>
+          ))}
+          {visibleFiles.map((file) => (
             <div className={`image-list-row file-list-row ${selected.includes(file.id) ? 'selected' : ''}`} key={file.id}>
               <button className={`select-box ${selected.includes(file.id) ? 'selected' : ''}`} onClick={() => toggleSelect(file.id)}>{selected.includes(file.id) && <Check size={13} />}</button>
               <button className="file-list-open" onClick={() => onShare(file)} aria-label={`查看文件 ${file.name}`} title="查看文件"><FileText size={18} /></button>
-              <div className="list-name"><b>{file.name}</b><span>{fileGroupName(file)}</span></div>
+              <div className="list-name"><b>{file.name}</b><span>{fileDirectoryLabel(file, rootGroupName)}</span></div>
               <span>{file.type}</span><span>{formatBytes(file.size)}</span><span>{formatDate(file.createdAt)}</span>
               <div className="list-actions"><button onClick={() => void onPatch(file.id, { starred: !file.starred })}><Star size={16} fill={file.starred ? 'currentColor' : 'none'} /></button><button onClick={() => onShare(file)}><Share2 size={16} /></button></div>
             </div>
@@ -2035,9 +2088,9 @@ function FileLibraryView({ files, groups, selectedGroup, onGroupChange, onGroupC
       {showNewGroup && (
         <div className="modal-backdrop" onMouseDown={() => setShowNewGroup(false)}>
           <div className="small-modal" onMouseDown={(event) => event.stopPropagation()}>
-            <span className="modal-title-icon"><FolderPlus size={20} /></span><h3>新建文件分组</h3><p>为文件分组取一个容易识别的名字。</p>
-            <label>分组名称<input autoFocus value={newGroup} maxLength={100} onChange={(event) => setNewGroup(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void createGroup()} placeholder="例如：合同文档" /></label>
-            <div><button className="button button-ghost" disabled={creatingGroup} onClick={() => setShowNewGroup(false)}>取消</button><button className="button button-primary" disabled={creatingGroup || !newGroup.trim()} onClick={() => void createGroup()}>{creatingGroup ? '正在创建…' : '创建分组'}</button></div>
+            <span className="modal-title-icon"><FolderPlus size={20} /></span><h3>新建文件夹</h3><p>为文件夹取一个容易识别的名字。</p>
+            <label>文件夹名称<input autoFocus value={newGroup} maxLength={100} onChange={(event) => setNewGroup(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void createGroup()} placeholder="例如：合同文档" /></label>
+            <div><button className="button button-ghost" disabled={creatingGroup} onClick={() => setShowNewGroup(false)}>取消</button><button className="button button-primary" disabled={creatingGroup || !newGroup.trim()} onClick={() => void createGroup()}>{creatingGroup ? '正在创建…' : '创建文件夹'}</button></div>
           </div>
         </div>
       )}
@@ -2289,9 +2342,10 @@ function VideoShareModal({ video, categories, onClose, onPatch, onDelete, notify
   )
 }
 
-function FileShareModal({ file, groups, onClose, onPatch, onDelete, notify }: {
+function FileShareModal({ file, groups, rootGroupName, onClose, onPatch, onDelete, notify }: {
   file: FileItem
   groups: FileGroupItem[]
+  rootGroupName: string
   onClose: () => void
   onPatch: (id: string, changes: Partial<FileItem>) => Promise<boolean>
   onDelete: () => void
@@ -2328,8 +2382,8 @@ function FileShareModal({ file, groups, onClose, onPatch, onDelete, notify }: {
           <span>{file.type}</span>
         </div>
         <div className="share-body">
-          <div className="share-heading"><span><small>{fileGroupName(file)}</small><RenameControl name={file.name} mediaLabel="文件" onSave={(name) => onPatch(file.id, { name })} notify={notify} /><p>{file.type} · {formatBytes(file.size)} · {formatDate(file.createdAt)}</p></span><button className={file.starred ? 'starred' : ''} onClick={() => void onPatch(file.id, { starred: !file.starred })} aria-label={file.starred ? '取消收藏' : '收藏文件'}><Star size={18} fill={file.starred ? 'currentColor' : 'none'} /></button></div>
-          <label className="video-detail-category"><span>所属分组</span><select value={fileGroupName(file)} onChange={(event) => void onPatch(file.id, { group: event.target.value })}>{groups.map((group) => <option key={group.id} value={group.name}>{group.name}</option>)}</select></label>
+          <div className="share-heading"><span><small>{fileDirectoryLabel(file, rootGroupName)}</small><RenameControl name={file.name} mediaLabel="文件" onSave={(name) => onPatch(file.id, { name })} notify={notify} /><p>{file.type} · {formatBytes(file.size)} · {formatDate(file.createdAt)}</p></span><button className={file.starred ? 'starred' : ''} onClick={() => void onPatch(file.id, { starred: !file.starred })} aria-label={file.starred ? '取消收藏' : '收藏文件'}><Star size={18} fill={file.starred ? 'currentColor' : 'none'} /></button></div>
+          <label className="video-detail-category"><span>所在位置</span><select value={fileGroupName(file)} onChange={(event) => void onPatch(file.id, { group: event.target.value })}>{groups.map((group) => <option key={group.id} value={group.name}>{group.name === rootGroupName ? '根目录' : group.name}</option>)}</select></label>
           <div className="video-share-note"><FileText size={15} /> 文件直链默认以下载方式响应，适合分享文档、素材包和交付物。</div>
           <div className="link-list"><FileReferenceFields file={file} notify={notify} /></div>
           <div className="share-footer"><button className="danger-button" onClick={onDelete}><Trash2 size={16} /> 删除文件</button><a className="button button-secondary" href={file.url} download><Download size={16} /> 下载文件</a><button className="button button-primary" onClick={() => void copy()}><Link2 size={16} /> 复制直链</button></div>
