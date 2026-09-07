@@ -111,7 +111,9 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   const publicConfig = await requestJson(`${baseUrl}/api/public/config`)
   assert.equal(publicConfig.response.status, 200)
   assert.equal(publicConfig.body.fileMaxFiles, 20)
+  assert.equal(publicConfig.body.fileAcceptsAnyExtension, true)
   assert.equal(publicConfig.body.fileExtensions.includes('pdf'), true)
+  assert.equal(publicConfig.body.fileExtensions.includes('exe'), true)
 
   const invalidRemoteImport = await requestJson(`${baseUrl}/api/remote-imports`, {
     method: 'POST',
@@ -259,6 +261,25 @@ test('核心 API、权限隔离、上传和异常路由可用', async (context) 
   assert.equal(initialFileGroups.body[0].isDefault, true)
   assert.equal(initialFileGroups.body[0].fileCount, 1)
   assert.equal(initialFileGroups.body[0].storageUsed, fileBytes.length)
+
+  const installerBytes = Buffer.from('MZ PICNEST INSTALLER TEST')
+  const installerForm = new FormData()
+  installerForm.append('files', new Blob([installerBytes], { type: 'application/x-msdownload' }), 'McStartUP_0.1.0_x64-setup.exe')
+  const installerUpload = await requestJson(`${baseUrl}/api/files`, { method: 'POST', headers: { Cookie: memberCookie }, body: installerForm })
+  assert.equal(installerUpload.response.status, 201)
+  const installerFile = installerUpload.body[0]
+  assert.equal(installerFile.name, 'McStartUP_0.1.0_x64-setup.exe')
+  assert.equal(installerFile.filename, 'McStartUP_0.1.0_x64-setup.exe')
+  assert.equal(installerFile.type, 'EXE')
+  assert.equal(installerFile.format, 'exe')
+  assert.equal(installerFile.extension, '.exe')
+  assert.match(installerFile.url, /\/media\/file\/[^/]+\/McStartUP_0\.1\.0_x64-setup\.exe$/)
+  const installerDownload = await fetch(installerFile.url)
+  assert.equal(installerDownload.status, 200)
+  assert.match(installerDownload.headers.get('content-disposition') || '', /attachment/)
+  assert.deepEqual(Buffer.from(await installerDownload.arrayBuffer()), installerBytes)
+  const installerDeletion = await fetch(`${baseUrl}/api/files/${installerFile.id}`, { method: 'DELETE', headers: { Cookie: memberCookie } })
+  assert.equal(installerDeletion.status, 204)
 
   const createdFileGroup = await requestJson(`${baseUrl}/api/file-groups`, {
     method: 'POST',

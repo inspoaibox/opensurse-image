@@ -31,7 +31,7 @@ PicNest 是一个自托管、多用户的图片、视频和文件托管与资产
 
 - 粘贴、拖曳、单选和批量选择上传
 - 视频库支持 MP4、WebM、MOV、M4V、AVI、MKV 上传、在线播放、Range 断点播放和分享
-- 文件库支持 PDF、Office 文档、文本、代码、压缩包、音频和设计源文件上传、分组、重命名、下载和分享
+- 文件库支持文档、安装包、压缩包、音频、代码、设计源文件和其他通用文件上传、分组、重命名、下载和分享；文件类型不再按扩展名白名单限制
 - 媒体库支持图片和视频重命名，文件库支持文件重命名，重命名后会同步更新公开文件名与引用地址
 - 工作台可分别选择目标相册、视频分类和文件分组，未选择时自动进入各自默认项
 - 登录用户单张最大 20 MB，单次最多 20 张
@@ -1151,13 +1151,13 @@ curl -X POST https://img.example.com/api/files \
   -F "group=交付文件"
 ```
 
-文件上传始终返回文件对象数组，即使只上传一个文件；单次最多 20 个，单个大小上限由 `PICNEST_FILE_MAX_MB` 控制，默认 1024 MB。默认支持 PDF、Office 文档、文本、代码、压缩包、音频和设计源文件等常见格式，服务端按原始字节保存。`GET /api/files` 返回列表，`GET /api/files/:id` 返回单个对象，`PATCH /api/files/:id` 支持修改 `name`、`group` 和 `starred`，`POST /api/files/bulk-delete` 支持按 ID 数组批量删除。文件分组通过 `GET/POST /api/file-groups` 管理，并可用 `PATCH /api/file-groups/:id/default` 设置默认分组。
+文件上传始终返回文件对象数组，即使只上传一个文件；单次最多 20 个，单个大小上限由 `PICNEST_FILE_MAX_MB` 控制，默认 1024 MB。通用文件不限制具体扩展名，服务端只校验文件名长度、扩展名是否包含路径分隔符/控制字符/常见非法文件名字符、大小和配额，并按原始字节保存。`GET /api/files` 返回列表，`GET /api/files/:id` 返回单个对象，`PATCH /api/files/:id` 支持修改 `name`、`group` 和 `starred`，`POST /api/files/bulk-delete` 支持按 ID 数组批量删除。文件分组通过 `GET/POST /api/file-groups` 管理，并可用 `PATCH /api/file-groups/:id/default` 设置默认分组。
 
 文件库独立于图片库和媒体库展示，用于文档、压缩包、音频、代码和交付物管理。文件可以在详情弹窗中重命名，系统会保留真实格式扩展名并同步更新公开下载文件名和引用地址。文件直链公开可读取，并以 `Content-Disposition: attachment` 下载方式响应。文件对象返回 `filename`、`url`、`path`、`type`、`format`、`extension`、`mimeType`、`size`、`group`、`starred`、`links` 和 `createdAt`。
 
 系统图片处理默认开启、默认保持原格式。管理员可在“系统设置 → 图片处理”中设置输出为 JPEG、PNG、WebP 或 AVIF，调整 1–100 的转换质量，并配置 EXIF 自动旋转和元数据清理。
 
-同一页面还维护系统级上传扩展名白名单，默认包含 `jpg`、`jpeg`、`png`、`gif`、`webp`、`svg`。管理员可以增删 1–12 位字母或数字组成的扩展名，最多 32 项且至少保留一项。该白名单同时用于工作台选择、拖拽、粘贴、登录 API 和游客上传；服务端不会信任浏览器或请求提供的 MIME 类型，而会校验图片二进制内容。当前白名单可通过 `GET /api/public/config` 的 `allowedExtensions` 或 `GET /api/settings/image-processing` 读取。
+同一页面还维护系统级图片上传扩展名白名单，默认包含 `jpg`、`jpeg`、`png`、`gif`、`webp`、`svg`。管理员可以增删 1–12 位字母或数字组成的扩展名，最多 32 项且至少保留一项。该白名单用于工作台识别图片、登录图片 API 和游客上传；服务端不会信任浏览器或请求提供的 MIME 类型，而会校验图片二进制内容。当前白名单可通过 `GET /api/public/config` 的 `allowedExtensions` 或 `GET /api/settings/image-processing` 读取。文件库不使用这份白名单限制通用文件扩展名。
 
 API 上传可使用 multipart 字段 `format`、`quality`、`autoOrient`、`stripMetadata` 覆盖本次请求；`format=default` 使用系统设置。上传扩展名白名单不能由单次请求覆盖。游客上传为防止任意处理参数消耗资源，始终使用系统默认策略。
 
@@ -1174,7 +1174,7 @@ API 上传可使用 multipart 字段 `format`、`quality`、`autoOrient`、`stri
 | `POST` | `/api/auth/login` | 公开 | 登录 |
 | `POST` | `/api/auth/logout` | 会话 | 退出登录 |
 | `GET` | `/api/auth/me` | 会话 | 当前用户 |
-| `GET` | `/api/public/config` | 公开 | 游客上传开关、限制和允许文件类型 |
+| `GET` | `/api/public/config` | 公开 | 游客上传开关、图片/视频限制、文件上传上限和常见类型提示 |
 | `POST` | `/api/public/images` | 游客开关开启 | 游客上传 |
 | `GET/POST` | `/api/users` | 管理员会话 | 查看或创建成员 |
 | `PATCH` | `/api/users/:id` | 管理员会话 | 修改成员资料、角色、密码、配额和存储策略 |

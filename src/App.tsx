@@ -81,7 +81,6 @@ const defaultHotlinkProtection: HotlinkProtectionSettings = {
 }
 const extensionAccept = (extensions: string[]) => extensions.map((extension) => `.${extension}`).join(',')
 const extensionSummary = (extensions: string[]) => extensions.map((extension) => extension.toUpperCase()).join('、')
-const mediaExtensionAccept = (imageExtensions: string[], videoExtensions: string[], fileExtensions: string[]) => [...imageExtensions, ...videoExtensions, ...fileExtensions].map((extension) => `.${extension}`).join(',')
 const uploadFileMatches = (file: File, extensions: string[]) => {
   const extension = file.name.split('.').pop()?.toLowerCase()
   return Boolean(extension && file.name.includes('.') && extensions.includes(extension))
@@ -102,8 +101,8 @@ const videoFileMatches = (file: File, extensions: string[]) => {
   return Boolean(extension && file.name.includes('.') && extensions.includes(extension))
 }
 const generalFileMatches = (file: File, extensions: string[]) => {
-  const extension = file.name.split('.').pop()?.toLowerCase()
-  return Boolean(extension && file.name.includes('.') && extensions.includes(extension))
+  void extensions
+  return Boolean(file.name.trim())
 }
 const mediaFileMatches = (file: File, imageExtensions: string[], videoExtensions: string[], fileExtensions: string[]) => uploadFileMatches(file, imageExtensions) || videoFileMatches(file, videoExtensions) || generalFileMatches(file, fileExtensions)
 
@@ -736,8 +735,6 @@ function App() {
     const imageFiles = files.filter((file) => uploadFileMatches(file, allowedExtensions))
     const videoFiles = files.filter((file) => !uploadFileMatches(file, allowedExtensions) && videoFileMatches(file, videoExtensions))
     const fileItems = files.filter((file) => !uploadFileMatches(file, allowedExtensions) && !videoFileMatches(file, videoExtensions) && generalFileMatches(file, fileExtensions))
-    const invalidType = files.find((file) => !mediaFileMatches(file, allowedExtensions, videoExtensions, fileExtensions))
-    if (invalidType) return notify(`${invalidType.name} 的文件类型不在允许列表中`)
     if (imageFiles.length > 20) return notify('单次最多上传 20 张图片')
     if (videoFiles.length > 10) return notify('单次最多上传 10 个视频')
     if (fileItems.length > 20) return notify('单次最多上传 20 个文件')
@@ -1549,11 +1546,11 @@ function UploadZone({ selectedAlbum, selectedVideoCategory, selectedFileGroup, a
       onDragLeave={() => setDragging(false)}
       onDrop={(event) => { event.preventDefault(); setDragging(false); receive(event.dataTransfer.files) }}
     >
-      <input id="file-picker" ref={inputRef} type="file" accept={mediaExtensionAccept(allowedExtensions, videoExtensions, fileExtensions)} multiple hidden onChange={(event) => { receive(event.target.files); event.currentTarget.value = '' }} />
+      <input id="file-picker" ref={inputRef} type="file" multiple hidden onChange={(event) => { receive(event.target.files); event.currentTarget.value = '' }} />
       <span className="upload-icon"><Upload size={27} /></span>
       <div className="upload-copy">
         <h3>{uploading ? phaseTitle : '把图片、视频或文件拖到这里'}</h3>
-        <p>{uploading ? uploadDescription : `图片 ${extensionSummary(allowedExtensions)} · 视频 ${extensionSummary(videoExtensions)} · 文件 ${extensionSummary(fileExtensions.slice(0, 12))}${fileExtensions.length > 12 ? ' 等' : ''}，按格式自动分流；图片 20MB / 个，视频 ${Math.round(videoMaxFileSize / 1024 / 1024)}MB / 个，文件 ${Math.round(fileMaxFileSize / 1024 / 1024)}MB / 个`}</p>
+        <p>{uploading ? uploadDescription : `图片 ${extensionSummary(allowedExtensions)} · 视频 ${extensionSummary(videoExtensions)} · 文件不限类型，按格式自动分流；图片 20MB / 个，视频 ${Math.round(videoMaxFileSize / 1024 / 1024)}MB / 个，文件 ${Math.round(fileMaxFileSize / 1024 / 1024)}MB / 个`}</p>
       </div>
       {uploading ? (
         uploadPhase === 'videos'

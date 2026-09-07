@@ -6,7 +6,7 @@ const endpointGroups = [
     title: '公开与认证',
     rows: [
       ['GET', '/api/health', '服务健康检查'],
-      ['GET', '/api/public/config', '读取游客上传开关、限制与允许文件类型'],
+      ['GET', '/api/public/config', '读取游客上传开关、图片/视频限制、文件上传上限'],
       ['POST', '/api/public/images', '游客上传 1–5 张图片，需管理员开启'],
       ['GET', '/api/auth/me', '读取当前认证用户；未登录时返回初始化状态'],
       ['POST', '/api/auth/register', '仅系统未初始化时创建首位管理员'],
@@ -409,7 +409,7 @@ const buildMarkdownDocs = (baseUrl: string) => {
     '',
     '处理参数均可省略，省略时使用系统设置。`format` 支持 `default`、`original`、`jpg`、`png`、`webp`、`avif`；`quality` 为 1–100；`autoOrient` 和 `stripMetadata` 为布尔值。',
     '',
-    '上传文件必须符合系统级 `allowedExtensions` 白名单，该白名单不能用单次请求覆盖。默认允许 `jpg`、`jpeg`、`png`、`gif`、`webp`、`svg`；请通过 `GET /api/public/config` 或 `GET /api/settings/image-processing` 读取当前值。',
+    '上传图片必须符合系统级 `allowedExtensions` 白名单，该白名单不能用单次请求覆盖。默认允许 `jpg`、`jpeg`、`png`、`gif`、`webp`、`svg`；请通过 `GET /api/public/config` 或 `GET /api/settings/image-processing` 读取当前值。文件库不使用这份白名单限制通用文件扩展名。',
     '',
     markdownCodeBlock('json', imageProcessingSettingsExample),
     '',
@@ -431,7 +431,7 @@ const buildMarkdownDocs = (baseUrl: string) => {
     '',
     markdownCodeBlock('bash', fileUploadCurlExample(baseUrl)),
     '',
-    '文件不会经过图片或视频处理引擎，服务端会校验扩展名白名单并按原始字节保存。默认支持常见 Office、PDF、文本、代码、压缩包、音频和设计源文件；请通过 `GET /api/public/config` 读取当前文件白名单和大小上限。',
+    '文件不会经过图片或视频处理引擎，也不限制具体扩展名；服务端只校验文件名长度、扩展名是否包含路径分隔符/控制字符/常见非法文件名字符、大小和配额，并按原始字节保存。请通过 `GET /api/public/config` 读取当前文件大小上限。',
     '',
     '## 远程导入',
     '',
@@ -641,7 +641,7 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
             <p><code>POST /api/images</code> 单次最多上传 20 张，每张最大 20 MB。重复提交 <code>files</code> 字段即可批量上传，<code>album</code> 可选；未填写时进入默认相册。</p>
             <ApiCode>{uploadCurlExample(baseUrl)}</ApiCode>
             <p>处理参数均可省略，省略时使用系统设置。<code>format</code> 支持 <code>default</code>、<code>original</code>、<code>jpg</code>、<code>png</code>、<code>webp</code>、<code>avif</code>；<code>quality</code> 为 1–100；<code>autoOrient</code> 和 <code>stripMetadata</code> 为布尔值。</p>
-            <p>上传文件必须符合系统级 <code>allowedExtensions</code> 白名单，该白名单不能用单次请求覆盖。默认允许 <code>jpg</code>、<code>jpeg</code>、<code>png</code>、<code>gif</code>、<code>webp</code>、<code>svg</code>；请通过 <code>GET /api/public/config</code> 或 <code>GET /api/settings/image-processing</code> 读取当前值。</p>
+            <p>上传图片必须符合系统级 <code>allowedExtensions</code> 白名单，该白名单不能用单次请求覆盖。默认允许 <code>jpg</code>、<code>jpeg</code>、<code>png</code>、<code>gif</code>、<code>webp</code>、<code>svg</code>；请通过 <code>GET /api/public/config</code> 或 <code>GET /api/settings/image-processing</code> 读取当前值。文件库不使用这份白名单限制通用文件扩展名。</p>
             <ApiCode>{imageProcessingSettingsExample}</ApiCode>
             <p>管理员可通过网页登录会话提交完整或部分设置；扩展名会转为小写、移除开头的点并自动去重，列表最多 32 项且不能为空。Bearer 密钥不能修改成员、存储和系统设置。</p>
             <p>上传接口始终返回数组，即使只上传一张。服务端会核对文件扩展名与二进制内容的真实格式、执行转换，并返回文件后缀、MIME 类型、处理结果和四种引用代码。游客上传不接受单次处理参数，始终使用系统默认策略和同一份白名单。</p>
@@ -666,7 +666,7 @@ export default function ApiDocsModal({ onClose }: { onClose: () => void }) {
             <h3>上传文件</h3>
             <p><code>POST /api/files</code> 单次最多上传 20 个通用文件，单个大小上限由服务端环境变量 <code>PICNEST_FILE_MAX_MB</code> 控制，默认 1024 MB。可选 <code>group</code> 或 <code>groupName</code> 指定文件分组，未填写时使用默认文件分组。</p>
             <ApiCode>{fileUploadCurlExample(baseUrl)}</ApiCode>
-            <p>文件不会经过图片或视频处理引擎，服务端会校验扩展名白名单并按原始字节保存。默认支持 Office、PDF、文本、代码、压缩包、音频和设计源文件；请通过 <code>GET /api/public/config</code> 读取当前文件白名单和大小上限。</p>
+            <p>文件不会经过图片或视频处理引擎，也不限制具体扩展名；服务端只校验文件名长度、扩展名是否包含路径分隔符/控制字符/常见非法文件名字符、大小和配额，并按原始字节保存。请通过 <code>GET /api/public/config</code> 读取当前文件大小上限。</p>
           </section>
 
           <section id="api-doc-remote-import">

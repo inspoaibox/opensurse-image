@@ -536,6 +536,12 @@ const fileMimeTypesByFormat = {
   '7z': 'application/x-7z-compressed',
   tar: 'application/x-tar',
   gz: 'application/gzip',
+  exe: 'application/x-msdownload',
+  msi: 'application/x-msi',
+  apk: 'application/vnd.android.package-archive',
+  dmg: 'application/x-apple-diskimage',
+  deb: 'application/vnd.debian.binary-package',
+  rpm: 'application/x-rpm',
   psd: 'image/vnd.adobe.photoshop',
   ai: 'application/postscript',
   sketch: 'application/octet-stream',
@@ -552,7 +558,15 @@ const fileMimeTypesByFormat = {
   sql: 'application/sql',
   log: 'text/plain',
 }
-const allowedFileExtensions = Object.freeze(Object.keys(fileMimeTypesByFormat))
+const knownFileExtensions = Object.freeze(Object.keys(fileMimeTypesByFormat))
+const normalizeGeneralFileExtension = (value) => String(value || '').trim().toLowerCase().replace(/^\./, '')
+const validGeneralFileExtension = (extension) => {
+  const normalized = normalizeGeneralFileExtension(extension)
+  return normalized.length <= 64 && !Array.from(normalized).some((character) => {
+    const code = character.charCodeAt(0)
+    return code < 32 || code === 127 || '<>:"|?*\\/'.includes(character)
+  })
+}
 const videoFormatFor = (row) => {
   const storedType = String(row.type || '').trim().toLowerCase().replace(/^video\//, '').replace(/^\./, '')
   if (allowedVideoExtensions.includes(storedType)) return storedType
@@ -560,10 +574,10 @@ const videoFormatFor = (row) => {
   return allowedVideoExtensions.includes(filenameExtension) ? filenameExtension : ''
 }
 const fileFormatFor = (row) => {
-  const storedType = String(row.type || '').trim().toLowerCase().replace(/^\./, '')
-  if (allowedFileExtensions.includes(storedType)) return storedType
-  const filenameExtension = path.extname(row.filename || row.name || '').slice(1).toLowerCase()
-  return allowedFileExtensions.includes(filenameExtension) ? filenameExtension : ''
+  const storedType = normalizeGeneralFileExtension(row.type)
+  if (storedType && validGeneralFileExtension(storedType)) return storedType
+  const filenameExtension = normalizeGeneralFileExtension(path.extname(row.filename || row.name || '').slice(1))
+  return filenameExtension && validGeneralFileExtension(filenameExtension) ? filenameExtension : ''
 }
 const fileMimeTypeFor = (extension, fallback = '') => fileMimeTypesByFormat[extension] || fallback || 'application/octet-stream'
 const normalizeImageFormat = (value) => {
@@ -880,11 +894,12 @@ const validateVideoFilename = (filename, mimetype = '') => {
 }
 
 const validateFileFilename = (filename) => {
-  const normalizedFilename = String(filename || '')
+  const normalizedFilename = normalizeUploadFilename(filename)
   if (normalizedFilename.length > 255) throw new ImageProcessingError('文件名不能超过 255 个字符', 400)
-  const extension = path.extname(normalizedFilename).replace(/^\./, '').toLowerCase()
-  if (!extension || !allowedFileExtensions.includes(extension)) {
-    throw new ImageProcessingError(`不允许上传 .${extension || '无扩展名'} 文件，允许类型：${allowedFileExtensions.map((item) => item.toUpperCase()).join('、')}`, 400)
+  if (normalizedFilename === '.' || normalizedFilename === '..') throw new ImageProcessingError('文件名无效', 400)
+  const extension = normalizeGeneralFileExtension(path.extname(normalizedFilename))
+  if (!validGeneralFileExtension(extension)) {
+    throw new ImageProcessingError('文件扩展名不能包含路径分隔符、控制字符或常见非法文件名字符，且不能超过 64 个字符', 400)
   }
   return extension
 }
@@ -1525,25 +1540,25 @@ const prepareRemoteFile = async ({ filePath, filename, contentType, taskId }) =>
     throw new ImageProcessingError(`远程图片格式 .${detectedImageFormat} 未在当前允许列表中`, 400)
   }
   const imageExtension = detectedImageFormat || ''
-  const sourceExtension = path.extname(filename).slice(1).toLowerCase()
+  const sourceExtension = normalizeGeneralFileExtension(path.extname(filename).slice(1))
   const videoExtension = allowedVideoExtensions.includes(sourceExtension)
     ? sourceExtension
     : remoteExtensionForMime(contentType, 'video')
-  const fileExtension = allowedFileExtensions.includes(sourceExtension)
+  const fileExtension = sourceExtension && validGeneralFileExtension(sourceExtension)
     ? sourceExtension
     : remoteExtensionForMime(contentType, 'file')
   const extension = imageExtension || videoExtension || fileExtension
-  const mediaType = imageExtension ? 'image' : videoExtension ? 'video' : fileExtension ? 'file' : ''
-  if (!mediaType || !extension) {
-    throw new ImageProcessingError(`无法识别远程文件格式，仅支持图片（${imageSettings.allowedExtensions.join('、').toUpperCase()}）、视频（${allowedVideoExtensions.join('、').toUpperCase()}）或文件（${allowedFileExtensions.join('、').toUpperCase()}）`, 400)
+  const mediaType = imageExtension ? 'image' : videoExtension ? 'video' : 'file'
+  if ((imageExtension || videoExtension) && !extension) {
+    throw new ImageProcessingError(`无法识别远程文件格式，仅支持图片（${imageSettings.allowedExtensions.join('、').toUpperCase()}）、视频（${allowedVideoExtensions.join('、').toUpperCase()}）或通用文件`, 400)
   }
 
   const normalizedFilename = normalizeUploadFilename(filename)
   const currentExtension = path.extname(normalizedFilename)
   const stem = path.basename(normalizedFilename, currentExtension) || `remote-${taskId.slice(0, 8)}`
-  const originalname = `${stem}.${extension}`
+  const originalname = extension ? `${stem}.${extension}` : normalizeUploadFilename(stem)
   const storedStem = stem.replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]/g, '-').slice(0, 48) || 'remote'
-  const storedFilename = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${storedStem}.${extension}`
+  const storedFilename = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${storedStem}${extension ? `.${extension}` : ''}`
   const mimetype = mediaType === 'image'
     ? mimeTypesByFormat[extension] || contentType || 'application/octet-stream'
     : mediaType === 'video'
@@ -1872,7 +1887,8 @@ app.get('/api/public/config', (_req, res) => {
     videoExtensions: allowedVideoExtensions,
     fileMaxFileSize: fileMaxBytes,
     fileMaxFiles: 20,
-    fileExtensions: allowedFileExtensions,
+    fileAcceptsAnyExtension: true,
+    fileExtensions: knownFileExtensions,
   })
 })
 

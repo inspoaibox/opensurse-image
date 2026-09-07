@@ -111,15 +111,16 @@ try {
   await page.getByText('请提供一个 HTTP 或 HTTPS 地址').waitFor()
 
   const png = await sharp({ create: { width: 16, height: 12, channels: 4, background: '#e77856' } }).png().toBuffer()
+  assert.equal(await page.locator('#file-picker').getAttribute('accept'), null)
   await page.locator('#file-picker').setInputFiles([
     { name: '上线检查.png', mimeType: 'image/png', buffer: png },
     { name: '上线检查视频.mp4', mimeType: 'video/mp4', buffer: Buffer.from('PICNEST UI VIDEO TEST') },
-    { name: '上线检查文件.txt', mimeType: 'text/plain', buffer: Buffer.from('PICNEST UI FILE TEST') },
+    { name: '上线检查文件.exe', mimeType: 'application/x-msdownload', buffer: Buffer.from('PICNEST UI FILE TEST') },
   ])
   await page.getByRole('heading', { name: '本次上传结果' }).waitFor()
   await page.getByRole('button', { name: '选择图片、视频或文件' }).waitFor()
   await page.getByText('上线检查视频.mp4', { exact: true }).waitFor()
-  await page.getByText('上线检查文件.txt', { exact: true }).waitFor()
+  await page.getByText('上线检查文件.exe', { exact: true }).waitFor()
   assert.equal(await page.locator('input[readonly][value*="/media/"]').count() > 0, true)
   await page.screenshot({ path: path.join(outputDirectory, 'desktop-workbench.png'), fullPage: true })
 
@@ -160,7 +161,7 @@ try {
   await page.getByLabel('分组名称').fill('UI 文档')
   await page.getByRole('button', { name: '创建分组' }).click()
   await page.getByRole('button', { name: /^UI 文档\s+0$/ }).waitFor()
-  await page.getByRole('button', { name: '查看文件 上线检查文件.txt' }).click()
+  await page.getByRole('button', { name: '查看文件 上线检查文件.exe' }).click()
   await page.getByRole('button', { name: '重命名文件' }).click()
   await page.getByLabel('重命名文件').fill('上线检查文件改名.pdf')
   await page.getByRole('button', { name: '保存文件名称' }).click()
